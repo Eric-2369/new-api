@@ -1,0 +1,51 @@
+name: Build freebsd-new-api binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_freebsd_new_api:
+        description: 'Build freebsd-new-api'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build-freebsd-new-api:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          check-latest: false
+
+      - name: Build frontend
+        if: ${{ fromJSON(github.event.inputs.build_freebsd_new_api) }}
+        run: |
+          cd web
+          npm install
+          DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(git describe --tags --always) npm run build
+
+      - name: Build backend
+        if: ${{ fromJSON(github.event.inputs.build_freebsd_new_api) }}
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: 14.1
+          usesh: true
+          prepare: |
+            pkg install -y jq wget curl git gcc bash gawk gsed
+            curl "https://go.dev/dl/go1.24.2.freebsd-amd64.tar.gz" --location | tar --extract --gzip --directory=/usr/local --strip-components=1
+          run: |
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            go mod download
+            go build -ldflags "-s -w -extldflags '-static' -X 'one-api/common.Version=$(git describe --tags --always)'" -o new-api
+
+      - name: Upload freebsd-new-api binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: freebsd-new-api
+          path: new-api
