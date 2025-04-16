@@ -1,0 +1,78 @@
+name: Build and Pack Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_linux_amd64:
+        description: "Build linux/amd64"
+        required: false
+        default: true
+        type: boolean
+      build_linux_arm64:
+        description: "Build linux/arm64"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-pack:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        if: ${{ inputs.build_linux_arm64 }}
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Get current date
+        run: echo "DATE=$(date +'%Y%m%d')" >> "$GITHUB_ENV"
+
+      - name: Build Docker image (linux/amd64)
+        if: ${{ fromJSON(github.event.inputs.build_linux_amd64) }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: eric2369/debian12-new-api:${{ env.DATE }},eric2369/debian12-new-api:latest
+          platforms: linux/amd64
+          outputs: type=docker,dest=${{ runner.temp }}/debian12-new-api-linux-amd64.tar
+
+      - name: Upload Docker image (linux/amd64)
+        if: ${{ fromJSON(github.event.inputs.build_linux_amd64) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian12-new-api-linux-amd64-${{ env.DATE }}
+          path: ${{ runner.temp }}/debian12-new-api-linux-amd64.tar
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Build Docker image (linux/arm64)
+        if: ${{ fromJSON(github.event.inputs.build_linux_arm64) }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: eric2369/debian12-new-api:${{ env.DATE }},eric2369/debian12-new-api:latest
+          platforms: linux/arm64
+          outputs: type=docker,dest=${{ runner.temp }}/debian12-new-api-linux-arm64.tar
+
+      - name: Upload Docker image (linux/arm64)
+        if: ${{ fromJSON(github.event.inputs.build_linux_arm64) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian12-new-api-linux-arm64-${{ env.DATE }}
+          path: ${{ runner.temp }}/debian12-new-api-linux-arm64.tar
+          if-no-files-found: error
+          retention-days: 1
