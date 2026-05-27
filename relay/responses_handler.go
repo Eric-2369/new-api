@@ -1,10 +1,13 @@
 package relay
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
@@ -124,7 +127,15 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	}
 
 	var httpResp *http.Response
+	stopCompactKeepAlive := startResponsesCompactKeepAlive(c, info)
+	if stopCompactKeepAlive != nil {
+		defer stopCompactKeepAlive()
+	}
 	resp, err := adaptor.DoRequest(c, info, requestBody)
+	if stopCompactKeepAlive != nil {
+		stopCompactKeepAlive()
+		stopCompactKeepAlive = nil
+	}
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
@@ -171,6 +182,69 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.PostAudioConsumeQuota(c, info, usageDto, "")
 	} else {
 		service.PostTextConsumeQuota(c, info, usageDto, nil)
+	}
+	return nil
+}
+
+func startResponsesCompactKeepAlive(c *gin.Context, info *relaycommon.RelayInfo) func() {
+	if c == nil || info == nil || info.RelayMode != relayconstant.RelayModeResponsesCompact {
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var once sync.Once
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(helper.DefaultPingInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if err := writeResponsesCompactKeepAlive(c); err != nil {
+					logger.LogError(c, "responses compact keepalive stopped: "+err.Error())
+					return
+				}
+			case <-ctx.Done():
+				return
+			case <-c.Request.Context().Done():
+				return
+			}
+		}
+	}()
+
+	return func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+	}
+}
+
+func writeResponsesCompactKeepAlive(c *gin.Context) error {
+	if c == nil || c.Writer == nil {
+		return nil
+	}
+	if c.Request != nil && c.Request.Context().Err() != nil {
+		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
+	}
+
+	header := c.Writer.Header()
+	header.Set("Content-Type", "application/json")
+	header.Set("Cache-Control", "no-cache")
+	header.Set("X-Accel-Buffering", "no")
+	header.Del("Content-Length")
+
+	if !c.Writer.Written() {
+		c.Writer.WriteHeader(http.StatusOK)
+	}
+	if _, err := c.Writer.Write([]byte("\n")); err != nil {
+		return fmt.Errorf("write json whitespace keepalive failed: %w", err)
+	}
+	if err := helper.FlushWriter(c); err != nil {
+		return fmt.Errorf("flush json whitespace keepalive failed: %w", err)
 	}
 	return nil
 }
