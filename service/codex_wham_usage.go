@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/google/uuid"
@@ -119,9 +120,40 @@ func ConsumeCodexWhamRateLimitResetCredit(
 		return 0, nil, fmt.Errorf("empty accountID")
 	}
 
-	requestBody, err := common.Marshal(map[string]string{
+	requestPayload := map[string]string{
 		"redeem_request_id": uuid.NewString(),
-	})
+	}
+	if creditsStatusCode, creditsBody, creditsErr := FetchCodexWhamRateLimitResetCredits(ctx, client, baseURL, accessToken, accountID); creditsErr == nil && creditsStatusCode >= 200 && creditsStatusCode < 300 {
+		var resetCredits struct {
+			Credits []struct {
+				ID        string `json:"id"`
+				Status    string `json:"status"`
+				ExpiresAt string `json:"expires_at"`
+			} `json:"credits"`
+		}
+		if common.Unmarshal(creditsBody, &resetCredits) == nil {
+			selectedCreditID := ""
+			selectedExpiresAt := time.Time{}
+			for _, credit := range resetCredits.Credits {
+				creditID := strings.TrimSpace(credit.ID)
+				if creditID == "" || strings.ToLower(strings.TrimSpace(credit.Status)) != "available" {
+					continue
+				}
+				expiresAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(credit.ExpiresAt))
+				if selectedCreditID == "" || (parseErr == nil && (selectedExpiresAt.IsZero() || expiresAt.Before(selectedExpiresAt))) {
+					selectedCreditID = creditID
+					if parseErr == nil {
+						selectedExpiresAt = expiresAt
+					}
+				}
+			}
+			if selectedCreditID != "" {
+				requestPayload["credit_id"] = selectedCreditID
+			}
+		}
+	}
+
+	requestBody, err := common.Marshal(requestPayload)
 	if err != nil {
 		return 0, nil, err
 	}
