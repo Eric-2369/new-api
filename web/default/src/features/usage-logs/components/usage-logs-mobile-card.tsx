@@ -283,9 +283,14 @@ function MobileStreamTimingField({ log }: { log: UsageLog }) {
 
   const other = parseLogOther(log.other)
   const useTime = log.use_time || 0
+  const firstTokenTime =
+    log.is_stream && other?.frt != null && other.frt > 0 ? other.frt / 1000 : 0
+  const generationTime = useTime - firstTokenTime
+  const generationTokens =
+    firstTokenTime > 0 ? log.completion_tokens - 1 : log.completion_tokens
   const tokensPerSecond =
-    useTime > 0 && log.completion_tokens > 0
-      ? log.completion_tokens / useTime
+    generationTime > 0 && generationTokens > 0
+      ? generationTokens / generationTime
       : null
 
   return (
