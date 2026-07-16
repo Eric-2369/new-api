@@ -337,3 +337,21 @@ it('shows loading placeholders without displaying stale log fields', () => {
     screen.queryByRole('button', { name: /^Model:/ })
   ).not.toBeInTheDocument()
 })
+
+it.each([
+  { frt: 2000, useTime: 10, tokens: 81, expected: '10 t/s' },
+  { frt: 0, useTime: 10, tokens: 80, expected: '8 t/s' },
+])('calculates streaming TPS after first token with frt=$frt', (testCase) => {
+  renderLogs({
+    logs: [
+      {
+        ...log,
+        is_stream: true,
+        use_time: testCase.useTime,
+        completion_tokens: testCase.tokens,
+        other: JSON.stringify({ frt: testCase.frt }),
+      },
+    ],
+  })
+  expect(screen.getByText(testCase.expected)).toBeVisible()
+})

@@ -67,6 +67,16 @@ export function CommonLogMobileCard<TData>(props: {
   const [selectedField, setSelectedField] = useState<FieldName | null>(null)
   const log = props.log
   const other = parseLogOther(log.other)
+  const useTime = log.use_time || 0
+  const firstTokenTime =
+    log.is_stream && other?.frt != null && other.frt > 0 ? other.frt / 1000 : 0
+  const generationTime = useTime - firstTokenTime
+  const generationTokens =
+    firstTokenTime > 0 ? log.completion_tokens - 1 : log.completion_tokens
+  const tokensPerSecond =
+    generationTime > 0 && generationTokens > 0
+      ? generationTokens / generationTime
+      : null
   const displayable = isDisplayableLogType(log.type)
   const timing = isTimingLogType(log.type)
   const model = formatModelName(log)
@@ -195,11 +205,7 @@ export function CommonLogMobileCard<TData>(props: {
                   isStream={log.is_stream}
                   isTask={other?.is_task === true}
                   isSyncTask={other?.task_sync === true}
-                  tokensPerSecond={
-                    log.use_time > 0 && log.completion_tokens > 0
-                      ? log.completion_tokens / log.use_time
-                      : null
-                  }
+                  tokensPerSecond={tokensPerSecond}
                   streamStatus={other?.stream_status}
                 />
               )}
