@@ -135,6 +135,9 @@ func (a *Adaptor) GetChannelName() string {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
+	if strings.SplitN(info.RequestURLPath, "?", 2)[0] == "/v1/alpha/search" {
+		return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, "/backend-api/codex/alpha/search", info.ChannelType), nil
+	}
 	if info.RelayMode != relayconstant.RelayModeResponses && info.RelayMode != relayconstant.RelayModeResponsesCompact {
 		return "", errors.New("codex channel: only /v1/responses and /v1/responses/compact are supported")
 	}
