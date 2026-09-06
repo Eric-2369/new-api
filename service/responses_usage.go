@@ -19,6 +19,10 @@ type ResponsesUsageAccumulator struct {
 	info           *relaycommon.RelayInfo
 	usage          *dto.Usage
 	outputText     strings.Builder
+	toolOutputs    map[string]*responsesToolOutput
+	toolIDs        map[string]string
+	toolIndexes    map[int]string
+	billableTools  map[string]struct{}
 	imageCounter   relaycommon.ImageGenerationCallCounter
 	imageCommitted bool
 	started        bool
@@ -44,6 +48,13 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse, 
 	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 		if event.Response != nil {
 			ApplyResponsesUsage(a.usage, event.Response.Usage)
+			for i := range event.Response.Output {
+				a.observeToolOutput(&event.Response.Output[i], "", &i, "")
+				item := &event.Response.Output[i]
+				if item.Status == "" || item.Status == "completed" {
+					a.observeBillableToolCall(item, &i)
+				}
+			}
 			if a.outputText.Len() == 0 {
 				// Some upstreams carry the output only on the terminal event.
 				a.outputText.WriteString(relayconvert.ExtractOutputTextFromResponses(event.Response))
@@ -65,7 +76,9 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse, 
 		}
 		a.imageCounter.Commit(a.info)
 		a.imageCommitted = true
-	case "response.output_text.delta", "response.function_call_arguments.delta",
+	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
+		a.observeToolOutput(nil, event.ItemID, event.OutputIndex, event.Delta)
+	case "response.output_text.delta",
 		"response.reasoning_summary_text.delta", "response.reasoning_text.delta", "response.refusal.delta":
 		// Every delta kind here is generated output that upstream bills as
 		// output tokens, so all of them feed the missing-usage estimate.
@@ -74,14 +87,50 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse, 
 		if event.Item == nil {
 			return
 		}
+		a.observeToolOutput(event.Item, event.Item.ID, event.OutputIndex, "")
 		switch event.Item.Type {
 		case dto.BuildInCallWebSearchCall, dto.BuildInCallFileSearchCall, dto.BuildInCallFunctionCall:
-			a.info.CountBillableToolCall(event.Item.Type, event.Item.Name)
+			a.observeBillableToolCall(event.Item, event.OutputIndex)
 		case dto.ResponsesOutputTypeImageGenerationCall:
 			if !a.imageCommitted {
 				a.imageCounter.Observe(event.Item, event.OutputIndex)
 			}
 		}
+	}
+}
+
+// Completed item events and terminal snapshots describe the same tool calls.
+// Remember every available identity, including aliases learned on duplicates.
+func (a *ResponsesUsageAccumulator) observeBillableToolCall(item *dto.ResponsesOutput, index *int) {
+	switch item.Type {
+	case dto.BuildInCallWebSearchCall, dto.BuildInCallFileSearchCall, dto.BuildInCallFunctionCall:
+	default:
+		return
+	}
+	var aliases []string
+	if item.ID != "" {
+		aliases = append(aliases, "id:"+item.ID)
+	}
+	if item.CallId != "" {
+		aliases = append(aliases, "call:"+item.CallId)
+	}
+	if index != nil && *index >= 0 {
+		aliases = append(aliases, fmt.Sprintf("index:%d", *index))
+	}
+	if a.billableTools == nil {
+		a.billableTools = make(map[string]struct{})
+	}
+	seen := false
+	for _, alias := range aliases {
+		if _, exists := a.billableTools[alias]; exists {
+			seen = true
+		}
+		a.billableTools[alias] = struct{}{}
+	}
+	// Without an identity, preserve per-event counting rather than collapsing
+	// distinct calls with identical names or arguments.
+	if !seen {
+		a.info.CountBillableToolCall(item.Type, item.Name)
 	}
 }
 
@@ -99,6 +148,17 @@ func (a *ResponsesUsageAccumulator) Finish() *dto.Usage {
 	if a.usage.CompletionTokens == 0 {
 		if output := a.outputText.String(); output != "" {
 			a.usage.CompletionTokens = tokenkit.Count(a.info.GetUpstreamModelName(), output)
+		}
+		for _, output := range a.toolOutputs {
+			text := output.delta.String()
+			if output.complete != nil {
+				text = *output.complete
+			}
+			var clamp *common.QuotaClamp
+			a.usage.CompletionTokens, clamp = common.QuotaFromFloatChecked(float64(a.usage.CompletionTokens) + float64(tokenkit.Count(a.info.GetUpstreamModelName(), text)))
+			if clamp != nil {
+				a.info.QuotaClamp = clamp
+			}
 		}
 	}
 	// Upstream bills the prompt as soon as it starts generating, so a stream
@@ -168,5 +228,77 @@ func ApplyResponsesUsage(dst *dto.Usage, src *dto.Usage) {
 	outputDetails := dst.CompletionTokenDetails
 	if outputDetails != (dto.OutputTokenDetails{}) {
 		dst.OutputTokensDetails = &outputDetails
+	}
+}
+
+// A completed tool payload replaces its deltas, while another item's output
+// remains independent. IDs and output indices can be supplied at different stages.
+type responsesToolOutput struct {
+	delta    strings.Builder
+	complete *string
+}
+
+func (a *ResponsesUsageAccumulator) observeToolOutput(item *dto.ResponsesOutput, id string, index *int, delta string) {
+	var complete *string
+	if item != nil {
+		var payload common.RawMessage
+		switch item.Type {
+		case "function_call":
+			payload = item.Arguments
+		case "custom_tool_call":
+			payload = item.Input
+		default:
+			return
+		}
+		id = item.ID
+		if len(payload) > 0 && string(payload) != "null" {
+			var text string
+			if common.Unmarshal(payload, &text) != nil {
+				text = string(payload)
+			}
+			complete = &text
+		}
+	}
+	if a.toolOutputs == nil {
+		a.toolOutputs = make(map[string]*responsesToolOutput)
+		a.toolIDs = make(map[string]string)
+		a.toolIndexes = make(map[int]string)
+	}
+	key := ""
+	if id != "" {
+		key = "id:" + id
+	}
+	if index != nil {
+		key = fmt.Sprintf("index:%d", *index)
+		if existing, ok := a.toolIndexes[*index]; ok {
+			key = existing
+		}
+	}
+	if existing, ok := a.toolIDs[id]; id != "" && ok {
+		key = existing
+	}
+	// Legacy delta frames omit both identities. A following identified item
+	// can adopt that sole anonymous stream rather than count it twice.
+	if key != "" && len(a.toolOutputs) == 1 && a.toolOutputs[""] != nil {
+		a.toolOutputs[key] = a.toolOutputs[""]
+		delete(a.toolOutputs, "")
+	}
+	if id != "" {
+		a.toolIDs[id] = key
+	}
+	if index != nil {
+		a.toolIndexes[*index] = key
+	}
+	output := a.toolOutputs[key]
+	if output == nil {
+		output = &responsesToolOutput{}
+		a.toolOutputs[key] = output
+	}
+	if complete != nil {
+		output.complete = complete
+		output.delta.Reset()
+	}
+	if output.complete == nil {
+		output.delta.WriteString(delta)
 	}
 }

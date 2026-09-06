@@ -200,6 +200,7 @@ export function CommonLogMobileCard<TData>(props: {
             <div className='col-start-2 flex min-w-0 flex-col items-end gap-1 [overflow-wrap:anywhere]'>
               {props.cells.has('is_stream') && (
                 <StreamTpsCell
+                  clientTransport={other?.fork_extensions?.client_transport}
                   compact
                   className='min-h-5 max-w-full min-w-0 justify-end'
                   isStream={log.is_stream}

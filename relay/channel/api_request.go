@@ -438,6 +438,55 @@ func toWebSocketURL(raw string) string {
 	}
 }
 
+func DoResponsesWebSocketRequest(a Adaptor, c *gin.Context, info *common.RelayInfo) (*websocket.Conn, *http.Response, error) {
+	requestURL, err := a.GetRequestURL(info)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get request url failed: %w", err)
+	}
+	target, err := url.Parse(requestURL)
+	if err != nil || target.Host == "" {
+		return nil, nil, errors.New("invalid Responses WebSocket URL")
+	}
+	switch strings.ToLower(target.Scheme) {
+	case "https":
+		target.Scheme = "wss"
+	case "http":
+		target.Scheme = "ws"
+	case "ws", "wss":
+	default:
+		return nil, nil, errors.New("invalid Responses WebSocket URL scheme")
+	}
+
+	common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, target.Scheme+"://"+target.Host)
+
+	headers := http.Header{}
+	if err = a.SetupRequestHeader(c, &headers, info); err != nil {
+		return nil, nil, fmt.Errorf("setup request header failed: %w", err)
+	}
+	headers.Set("OpenAI-Beta", "responses_websockets=2026-02-06")
+	headerOverride, err := processHeaderOverride(info, c)
+	if err != nil {
+		return nil, nil, err
+	}
+	for key, value := range headerOverride {
+		headers.Set(key, value)
+	}
+
+	dialer := *websocket.DefaultDialer
+	dialer.EnableCompression = true
+	if err = service.ConfigureWebSocketDialer(&dialer, info.ChannelSetting.Proxy, target); err != nil {
+		return nil, nil, fmt.Errorf("configure WebSocket proxy failed: %w", err)
+	}
+	if info.ChannelSetting.TLSInsecureSkipVerify {
+		dialer.TLSClientConfig = common2.InsecureTLSConfig.Clone()
+	}
+	conn, response, err := service.DialWebSocketContext(c.Request.Context(), &dialer, target.String(), headers)
+	if err != nil {
+		return nil, response, fmt.Errorf("dial failed to %s: %w", common.SanitizeURLForLog(target.String()), err)
+	}
+	return conn, response, nil
+}
+
 func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	return doRequest(c, req, info)
 }

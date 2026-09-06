@@ -705,6 +705,16 @@ func MarkChannelAffinityUsed(c *gin.Context, selectedGroup string, channelID int
 	c.Set(ginKeyChannelAffinityLogInfo, info)
 }
 
+// MarkResponsesWSConnectionReused records transport stickiness without claiming
+// a rule/cache hit or carrying session keys into the consume log.
+func MarkResponsesWSConnectionReused(c *gin.Context, selectedGroup string, channelID int) {
+	c.Set(ginKeyChannelAffinityLogInfo, map[string]any{
+		"source":         "websocket_connection",
+		"channel_id":     channelID,
+		"selected_group": selectedGroup,
+	})
+}
+
 func AppendChannelAffinityAdminInfo(c *gin.Context, other *model.LogOther) {
 	if c == nil || other == nil {
 		return

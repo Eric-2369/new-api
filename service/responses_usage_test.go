@@ -340,3 +340,65 @@ func TestResponsesUsageAccumulatorMissingUsageEstimation(t *testing.T) {
 		})
 	}
 }
+
+func TestResponsesUsageToolCallIdentity(t *testing.T) {
+	operation_setting.SetToolPriceForTest("responses_identity_priced", 5)
+	t.Cleanup(func() { operation_setting.DeleteToolPriceForTest("responses_identity_priced") })
+	for _, kind := range []string{"function_call", "web_search_call", "file_search_call"} {
+		for _, mode := range []string{"terminal_only", "duplicate_done", "index_then_id", "id_then_index", "call_id", "distinct_calls", "unfinished", "vendor_zero", "vendor_count"} {
+			t.Run(kind+"/"+mode, func(t *testing.T) {
+				tool := map[string]string{"function_call": "responses_identity_priced", "web_search_call": dto.BuildInToolWebSearchPreview, "file_search_call": dto.BuildInToolFileSearch}[kind]
+				info := &relaycommon.RelayInfo{OriginModelName: "gpt-4o", StreamStatus: relaycommon.NewStreamStatus()}
+				accumulator := NewResponsesUsageAccumulator(info)
+				item := dto.ResponsesOutput{ID: "one-call", CallId: "call-one", Type: kind, Status: "completed", Name: "responses_identity_priced", Arguments: common.RawMessage(`"{}"`)}
+				output := []dto.ResponsesOutput{item}
+				want := 1
+				switch mode {
+				case "duplicate_done", "vendor_zero", "vendor_count":
+					for range 2 {
+						accumulator.Observe(&dto.ResponsesStreamResponse{Type: dto.ResponsesOutputTypeItemDone, Item: &item, OutputIndex: common.GetPointer(0)}, nil)
+					}
+					if mode == "vendor_zero" || mode == "vendor_count" {
+						want = 0
+						if mode == "vendor_count" {
+							want = 3
+						}
+						info.VendorToolUsage = func([]byte) map[string]int { return map[string]int{tool: want} }
+					}
+				case "index_then_id":
+					partial := item
+					partial.ID = ""
+					partial.CallId = ""
+					accumulator.Observe(&dto.ResponsesStreamResponse{Type: dto.ResponsesOutputTypeItemDone, Item: &partial, OutputIndex: common.GetPointer(0)}, nil)
+					accumulator.Observe(&dto.ResponsesStreamResponse{Type: dto.ResponsesOutputTypeItemDone, Item: &item, OutputIndex: common.GetPointer(0)}, nil)
+					accumulator.Observe(&dto.ResponsesStreamResponse{Type: dto.ResponsesOutputTypeItemDone, Item: &item}, nil)
+				case "id_then_index", "call_id":
+					if mode == "call_id" {
+						item.ID = ""
+					}
+					accumulator.Observe(&dto.ResponsesStreamResponse{Type: dto.ResponsesOutputTypeItemDone, Item: &item}, nil)
+				case "distinct_calls":
+					second := item
+					second.ID = "two-call"
+					second.CallId = "call-two"
+					output = append(output, second)
+					want = 2
+				case "unfinished":
+					output[0].Status = "in_progress"
+					want = 0
+				}
+				terminal := &dto.ResponsesStreamResponse{Type: "response.completed", Response: &dto.OpenAIResponsesResponse{Output: output, Usage: &dto.Usage{InputTokens: 10, OutputTokens: 1}}}
+				accumulator.Observe(terminal, []byte(`{}`))
+				accumulator.Finish()
+				accumulator.Finish()
+				require.NotNil(t, info.ResponsesUsageInfo)
+				if mode == "unfinished" {
+					assert.NotContains(t, info.ResponsesUsageInfo.BuiltInTools, tool)
+					return
+				}
+				require.Contains(t, info.ResponsesUsageInfo.BuiltInTools, tool)
+				assert.Equal(t, want, info.ResponsesUsageInfo.BuiltInTools[tool].CallCount)
+			})
+		}
+	}
+}

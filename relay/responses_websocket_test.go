@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/QuantumNous/new-api/relay/channel/codex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -362,12 +363,10 @@ func TestNormalizeResponsesWSCreateEventWrapper(t *testing.T) {
 	if strings.TrimSpace(string(create.Generate)) != "false" {
 		t.Fatalf("generate = %s, want false", create.Generate)
 	}
-	if req.Stream != nil {
-		t.Fatalf("stream = %v, want nil", req.Stream)
-	}
-	if req.StreamOptions != nil {
-		t.Fatalf("stream_options = %#v, want nil", req.StreamOptions)
-	}
+	require.NotNil(t, req.Stream)
+	assert.True(t, *req.Stream)
+	require.NotNil(t, req.StreamOptions)
+	assert.True(t, req.StreamOptions.IncludeUsage)
 	if strings.TrimSpace(string(req.Store)) != "false" {
 		t.Fatalf("store = %s, want false", req.Store)
 	}
@@ -399,12 +398,10 @@ func TestNormalizeResponsesWSCreateEventFlat(t *testing.T) {
 	if strings.TrimSpace(string(create.Generate)) != "false" {
 		t.Fatalf("generate = %s, want false", create.Generate)
 	}
-	if req.Stream != nil {
-		t.Fatalf("stream = %v, want nil", req.Stream)
-	}
-	if req.StreamOptions != nil {
-		t.Fatalf("stream_options = %#v, want nil", req.StreamOptions)
-	}
+	require.NotNil(t, req.Stream)
+	assert.True(t, *req.Stream)
+	require.NotNil(t, req.StreamOptions)
+	assert.True(t, req.StreamOptions.IncludeUsage)
 }
 
 func TestBuildResponsesWSCreateEventIsFlat(t *testing.T) {
@@ -435,11 +432,11 @@ func TestBuildResponsesWSCreateEventIsFlat(t *testing.T) {
 	if data["generate"] != false {
 		t.Fatalf("generate = %#v, want false", data["generate"])
 	}
-	for _, key := range []string{"response", "event_id", "stream", "background", "stream_options"} {
-		if _, ok := data[key]; ok {
-			t.Fatalf("field %q should not be present in upstream event: %s", key, got)
-		}
-	}
+	assert.NotContains(t, data, "response")
+	assert.Equal(t, "evt_upstream", data["event_id"])
+	assert.Equal(t, true, data["stream"])
+	assert.Equal(t, true, data["background"])
+	assert.Equal(t, map[string]any{"include_usage": true}, data["stream_options"])
 }
 
 func TestHTTPResponsesRequestOmitsWebSocketMetadata(t *testing.T) {
@@ -459,7 +456,7 @@ func TestBuildResponsesWSErrorPayloadIncludesStatus(t *testing.T) {
 		types.ErrorCodeInvalidRequest,
 		http.StatusBadRequest,
 		types.ErrOptionWithSkipRetry(),
-	))
+	), nil)
 	if err != nil {
 		t.Fatalf("buildResponsesWSErrorPayload() error = %v", err)
 	}
@@ -480,8 +477,24 @@ func TestBuildResponsesWSErrorPayloadIncludesStatus(t *testing.T) {
 	}
 }
 
+func TestResponsesWSErrorMaskingPreservesRecoveryFields(t *testing.T) {
+	payload, err := buildResponsesWSErrorPayload("event", "stream", types.NewErrorWithStatusCode(
+		errors.New("failed at https://private.example/v1/responses; see https://platform.openai.com/docs"),
+		types.ErrorCodeDoRequestFailed, http.StatusTooManyRequests,
+	), map[string]any{"retry-after": "2"}, "https://private.example")
+	require.NoError(t, err)
+	var event map[string]any
+	require.NoError(t, common.Unmarshal(payload, &event))
+	assert.NotContains(t, string(payload), "private.example")
+	assert.Contains(t, string(payload), "https://platform.openai.com/docs")
+	assert.Equal(t, "event", event["event_id"])
+	assert.Equal(t, "stream", event["stream_id"])
+	assert.Equal(t, float64(http.StatusTooManyRequests), event["status"])
+	assert.Equal(t, map[string]any{"retry-after": "2"}, event["headers"])
+}
+
 func TestResponsesWSInvalidRequestErrorUsesBadRequestStatus(t *testing.T) {
-	payload, err := buildResponsesWSErrorPayload("", "", newResponsesWSInvalidRequestError(errors.New("bad event")))
+	payload, err := buildResponsesWSErrorPayload("", "", newResponsesWSInvalidRequestError(errors.New("bad event")), nil)
 	if err != nil {
 		t.Fatalf("buildResponsesWSErrorPayload() error = %v", err)
 	}
@@ -504,7 +517,7 @@ func newTestResponsesWSTarget(t *testing.T) (*websocket.Conn, func()) {
 
 func newTestWebSocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn, func()) {
 	t.Helper()
-	upgrader := websocket.Upgrader{}
+	upgrader := websocket.Upgrader{EnableCompression: true}
 	serverConnCh := make(chan *websocket.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -516,7 +529,7 @@ func newTestWebSocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn, func(
 	}))
 
 	targetURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	target, _, err := websocket.DefaultDialer.Dial(targetURL, nil)
+	target, _, err := (&websocket.Dialer{EnableCompression: true}).Dial(targetURL, nil)
 	if err != nil {
 		server.Close()
 		t.Fatalf("dial websocket: %v", err)
@@ -547,6 +560,7 @@ func TestResponsesWSMessageSizeLimit(t *testing.T) {
 			return nil
 		})
 	}()
+	client.EnableWriteCompression(false) // Keep coverage of the uncompressed frame limit too.
 	_ = client.WriteMessage(websocket.TextMessage, []byte(strings.Repeat("x", (1<<20)+1)))
 	require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
 	_, _, err := client.ReadMessage()
@@ -609,7 +623,7 @@ func TestResponsesWSPassthroughPreservesRawPricingParameters(t *testing.T) {
 	info := relaycommon.GenRelayInfoResponses(c, &create.Request)
 	payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
 	require.Nil(t, apiErr)
-	assert.JSONEq(t, `{"type":"response.create","generate":false,"model":"gpt-5.1","input":"hi","vendor":{"tier":"premium"}}`, string(payload))
+	assert.JSONEq(t, `{"type":"response.create","generate":false,"model":"gpt-5.1","input":"hi","vendor":{"tier":"premium"},"stream":true}`, string(payload))
 	storage, err := common.GetBodyStorage(c)
 	require.NoError(t, err)
 	require.NoError(t, storage.Close())
@@ -690,4 +704,189 @@ func TestResponsesWSErrorAttribution(t *testing.T) {
 			assert.Equal(t, tc.controlError, controlError)
 		})
 	}
+}
+
+func TestNormalizeResponsesWSCreateEventPreservesCodexFields(t *testing.T) {
+	for _, wrapped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrapped=%t", wrapped), func(t *testing.T) {
+			fields := `"model":"gpt-test","input":"hi","store":false,"stream":true,"background":true,"stream_options":{"include_usage":true}`
+			payload := `{"type":"response.create","event_id":"evt_1","generate":false,` + fields + `}`
+			if wrapped {
+				payload = `{"type":"response.create","event_id":"evt_1","generate":false,"response":{` + fields + `}}`
+			}
+			create, eventID, err := normalizeResponsesWSTestMessage([]byte(payload))
+			require.NoError(t, err)
+			assert.Equal(t, "evt_1", eventID)
+			require.NotNil(t, create.Request.Stream)
+			assert.True(t, *create.Request.Stream)
+			require.NotNil(t, create.Request.StreamOptions)
+			assert.True(t, create.Request.StreamOptions.IncludeUsage)
+			event, err := buildResponsesWSCreateEvent(create.Body, create.Generate, "")
+			require.NoError(t, err)
+			var body map[string]common.RawMessage
+			require.NoError(t, common.Unmarshal(event, &body))
+			assert.Equal(t, "true", string(body["stream"]))
+			assert.Equal(t, "true", string(body["background"]))
+			assert.Equal(t, "false", string(body["generate"]))
+			assert.NotContains(t, body, "response")
+		})
+	}
+}
+
+func TestResponsesWSCodexConversionPreservesExtensions(t *testing.T) {
+	create, _, err := normalizeResponsesWSTestMessage([]byte(`{"type":"response.create","model":"gpt-test","input":"hello","max_output_tokens":128,"temperature":0,"generate":false,"future_integer":9007199254740993}`))
+	require.NoError(t, err)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(create.Body)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, create.Request.Model)
+	common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeCodex)
+	info := relaycommon.GenRelayInfoResponses(c, &create.Request)
+	payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, "")
+	require.Nil(t, apiErr)
+	assert.JSONEq(t, `{"type":"response.create","model":"gpt-test","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"instructions":"","store":false,"generate":false,"future_integer":9007199254740993}`, string(payload))
+	common.CleanupBodyStorage(c)
+}
+
+func TestPrepareCodexResponsesWebSocketPayload(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-test",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:       constant.ChannelTypeCodex,
+			UpstreamModelName: "gpt-test",
+		},
+	}
+	payload := []byte(`{
+		"type":"response.create",
+		"model":"gpt-test",
+		"input":[],
+		"max_output_tokens":128,
+		"temperature":0,
+		"stream":true,
+		"stream_options":{"reasoning_summary_delivery":"sequential_cutoff","include_usage":false},
+		"generate":false,
+		"future_field":{"enabled":true},
+		"future_integer":9007199254740993
+	}`)
+	request := &dto.OpenAIResponsesRequest{}
+	require.NoError(t, common.Unmarshal(payload, request))
+
+	outbound, apiErr := prepareResponsesWebSocketPayload(ctx, info, &codex.Adaptor{}, request, payload)
+	require.Nil(t, apiErr)
+	assert.JSONEq(t, `{
+		"type":"response.create",
+		"model":"gpt-test",
+		"input":[],
+		"instructions":"",
+		"store":false,
+		"stream":true,
+		"stream_options":{"reasoning_summary_delivery":"sequential_cutoff","include_usage":false},
+		"generate":false,
+		"future_field":{"enabled":true},
+		"future_integer":9007199254740993
+	}`, string(outbound))
+	var forwarded map[string]common.RawMessage
+	require.NoError(t, common.Unmarshal(outbound, &forwarded))
+	assert.Equal(t, "9007199254740993", string(forwarded["future_integer"]))
+}
+
+func TestPrepareCodexResponsesWebSocketPayloadNormalizesStringInput(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-test",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:       constant.ChannelTypeCodex,
+			UpstreamModelName: "gpt-test",
+		},
+	}
+	payload := []byte(`{"type":"response.create","model":"gpt-test","input":"hello","stream":true}`)
+	request := &dto.OpenAIResponsesRequest{}
+	require.NoError(t, common.Unmarshal(payload, request))
+
+	outbound, apiErr := prepareResponsesWebSocketPayload(ctx, info, &codex.Adaptor{}, request, payload)
+	require.Nil(t, apiErr)
+	assert.JSONEq(t, `{
+		"type":"response.create",
+		"model":"gpt-test",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],
+		"instructions":"",
+		"store":false,
+		"stream":true
+	}`, string(outbound))
+}
+
+func TestResponsesWSNumericEffortAndEnvelopePreserveChannelRules(t *testing.T) {
+	for _, tc := range []struct {
+		name, effort, override, want string
+		invalid                      bool
+	}{
+		{name: "budget", effort: "8192", want: "8192"},
+		{name: "zero", effort: "0", want: "0"},
+		{name: "channel override", effort: "8192", override: `{"reasoning":{"effort":"high"},"stream_id":"wrong"}`, want: `"high"`},
+		{name: "negative", effort: "-1", invalid: true},
+		{name: "fraction", effort: "0.5", invalid: true},
+		{name: "oversized", effort: "18446744073686646784", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			create, _, err := normalizeResponsesWSTestMessage([]byte(`{"type":"response.create","model":"gpt-test","stream_id":"planner","input":[],"reasoning":{"effort":` + tc.effort + `,"context":"all_turns"},"stream":true,"stream_options":{"reasoning_summary_delivery":"sequential_cutoff"},"access_programs":{"cyber":"standard"}}`))
+			if tc.invalid {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(create.Body)))
+			common.SetContextKey(c, constant.ContextKeyOriginalModel, create.Request.Model)
+			common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeCodex)
+			if tc.override != "" {
+				var override map[string]any
+				require.NoError(t, common.UnmarshalJsonStr(tc.override, &override))
+				common.SetContextKey(c, constant.ContextKeyChannelParamOverride, override)
+			}
+			info := relaycommon.GenRelayInfoResponses(c, &create.Request)
+			payload, apiErr := buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+			require.Nil(t, apiErr)
+			var body map[string]common.RawMessage
+			require.NoError(t, common.Unmarshal(payload, &body))
+			var reasoning map[string]common.RawMessage
+			require.NoError(t, common.Unmarshal(body["reasoning"], &reasoning))
+			assert.Equal(t, tc.want, string(reasoning["effort"]))
+			assert.JSONEq(t, `"planner"`, string(body["stream_id"]))
+			assert.JSONEq(t, `{"reasoning_summary_delivery":"sequential_cutoff"}`, string(body["stream_options"]))
+			assert.JSONEq(t, `{"cyber":"standard"}`, string(body["access_programs"]))
+			common.CleanupBodyStorage(c)
+		})
+	}
+}
+
+func TestResponsesWSCompressedMessageLimit(t *testing.T) {
+	previous := constant.MaxRequestBodyMB
+	constant.MaxRequestBodyMB = 1
+	t.Cleanup(func() { constant.MaxRequestBodyMB = previous })
+	client, server, cleanup := newTestWebSocketPair(t)
+	defer cleanup()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	var admitted atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ResponsesWebSocketHelper(c, server, func(r *http.Request, _ string, _ func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
+			admitted.Store(r.ContentLength)
+			return newResponsesWSInvalidRequestError(errors.New("admitted oversized decompressed message"))
+		})
+	}()
+	payload := `{"type":"response.create","model":"ws-model","input":"` + strings.Repeat("x", 2<<20) + `"}`
+	require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(payload)))
+	require.NoError(t, client.SetReadDeadline(time.Now().Add(3*time.Second)))
+	_, _, err := client.ReadMessage()
+	assert.True(t, websocket.IsCloseError(err, websocket.CloseMessageTooBig), "must reject over-limit decompressed frames, got %v", err)
+	assert.Zero(t, admitted.Load(), "must enforce limit before invoking per-message auth or parsing request")
+	_ = client.Close()
+	<-done
 }

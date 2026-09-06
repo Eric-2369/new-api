@@ -17,6 +17,29 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// ClientTransportContextKey survives the synthetic HTTP request used by Responses WS.
+const ClientTransportContextKey = "fork_client_transport"
+
+// AppendClientTransportLogInfo keeps fork metadata outside upstream log fields.
+func AppendClientTransportLogInfo(ctx *gin.Context, info *relaycommon.RelayInfo, other *model.LogOther) {
+	if other == nil {
+		return
+	}
+	transport := ""
+	if ctx != nil && ctx.Request != nil {
+		transport = "http"
+	}
+	if info != nil && info.ClientWs != nil {
+		transport = "websocket"
+	}
+	if ctx != nil && ctx.GetString(ClientTransportContextKey) == "websocket" {
+		transport = "websocket"
+	}
+	if transport != "" {
+		other.SetPublic("fork_extensions", map[string]any{"client_transport": transport})
+	}
+}
+
 // attachQuotaSaturationToOther nests a quota saturation marker under
 // other.admin_info.quota_saturation. Nesting under admin_info makes it
 // admin-only for free, since model.formatUserLogs strips the whole admin_info
@@ -121,6 +144,7 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 		other.SetPublic("is_system_prompt_overwritten", true)
 	}
 
+	AppendClientTransportLogInfo(ctx, relayInfo, other)
 	AppendRelayLogAdminInfo(ctx, relayInfo, other)
 	AppendResponseModelLogInfo(relayInfo, other)
 	appendRequestPath(ctx, relayInfo, other)

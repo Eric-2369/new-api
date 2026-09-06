@@ -355,3 +355,29 @@ it.each([
   })
   expect(screen.getByText(testCase.expected)).toBeVisible()
 })
+
+it.each([
+  { transport: 'http', stream: false, label: 'HTTP · Non-stream' },
+  { transport: 'http', stream: true, label: 'HTTP · Stream' },
+  { transport: 'websocket', stream: true, label: 'WS · Stream' },
+  { transport: undefined, stream: true, label: 'Stream' },
+])(
+  'shows client transport without guessing legacy logs: $label',
+  ({ transport, stream, label }) => {
+    renderLogs({
+      logs: [
+        {
+          ...log,
+          is_stream: stream,
+          other: JSON.stringify({
+            fork_extensions: { client_transport: transport },
+          }),
+        },
+      ],
+    })
+    expect(screen.getByText(label)).toBeVisible()
+    if (!transport) {
+      expect(screen.queryByText(/HTTP|WS ·/)).not.toBeInTheDocument()
+    }
+  }
+)

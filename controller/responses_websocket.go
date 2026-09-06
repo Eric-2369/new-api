@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -36,6 +37,7 @@ var responsesWSRequestEngine = sync.OnceValue(func() *gin.Engine {
 	engine.POST("/v1/responses", func(c *gin.Context) {
 		state := c.Request.Context().Value(responsesWSRequestContextKey{}).(*responsesWSRequestState)
 		c.Set(common.RequestIdKey, state.requestID)
+		c.Set(service.ClientTransportContextKey, "websocket")
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 		c.Next()
 	}, middleware.BodyStorageCleanup(), middleware.TokenAuth(), middleware.ModelRequestRateLimit(), func(c *gin.Context) {
@@ -114,7 +116,9 @@ func newResponsesWSRequestRunner(c *gin.Context) relay.ResponsesWSRequestRunner 
 func ResponsesWebSocket(c *gin.Context) {
 	requestID := c.GetString(common.RequestIdKey)
 	runner := newResponsesWSRequestRunner(c)
-	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	responsesUpgrader := upgrader
+	responsesUpgrader.EnableCompression = true
+	ws, err := responsesUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
 	}

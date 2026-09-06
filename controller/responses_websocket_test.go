@@ -27,6 +27,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -40,6 +41,7 @@ var responsesWSTestUserSequence atomic.Int64
 
 func setupResponsesWSRequestTest(t *testing.T) (*model.User, *model.Token) {
 	t.Helper()
+	require.NoError(t, i18n.Init())
 	previousDB := model.DB
 	previousLogDB := model.LOG_DB
 	previousType := common.MainDatabaseType()
@@ -379,7 +381,7 @@ func newResponsesWSBillingTest(t *testing.T, expression string, handle func(*web
 			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 			return
 		}
-		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		ws, err := (&websocket.Upgrader{EnableCompression: true}).Upgrade(w, r, nil)
 		if !assert.NoError(t, err) {
 			return
 		}
@@ -417,8 +419,11 @@ func newResponsesWSBillingTest(t *testing.T, expression string, handle func(*web
 	gateway := httptest.NewServer(engine)
 	fixture.gatewayURL = gateway.URL
 	t.Cleanup(gateway.Close)
-	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/responses", http.Header{"Authorization": []string{"Bearer sk-" + token.Key}})
+	clientDialer := *websocket.DefaultDialer
+	clientDialer.EnableCompression = true
+	client, response, err := clientDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/responses", http.Header{"Authorization": []string{"Bearer sk-" + token.Key}})
 	require.NoError(t, err)
+	assert.Contains(t, response.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate")
 	fixture.client = client
 	t.Cleanup(func() { fixture.closeAndWait(t) })
 	return fixture
@@ -618,8 +623,10 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 	// channel, later creates on the same connection reuse it as a pin.
 	for index, wantDecision := range []string{"attempt:channel_selected", "select:pinned_channel"} {
 		var other struct {
-			AdminInfo struct {
-				RequestPolicy []struct {
+			ForkExtensions map[string]string `json:"fork_extensions"`
+			AdminInfo      struct {
+				ChannelAffinity map[string]any `json:"channel_affinity"`
+				RequestPolicy   []struct {
 					ChannelID int `json:"channel_id"`
 					Decision  struct {
 						Action string `json:"action"`
@@ -629,6 +636,16 @@ func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
 			} `json:"admin_info"`
 		}
 		require.NoError(t, common.UnmarshalJsonStr(logs[index].Other, &other))
+		assert.Equal(t, "websocket", other.ForkExtensions["client_transport"])
+		if index == 0 {
+			assert.Empty(t, other.AdminInfo.ChannelAffinity, "a new connection is not a reuse")
+		} else {
+			assert.Equal(t, map[string]any{
+				"source":         "websocket_connection",
+				"channel_id":     float64(fixture.channel.Id),
+				"selected_group": "default",
+			}, other.AdminInfo.ChannelAffinity)
+		}
 		var decisions []string
 		for _, event := range other.AdminInfo.RequestPolicy {
 			assert.Equal(t, fixture.channel.Id, event.ChannelID)
@@ -717,6 +734,17 @@ func TestResponsesWebSocketDialsNativeResponsesChannelTypes(t *testing.T) {
 			assert.Equal(t, tc.want("upstream-second"), <-targets)
 			fixture.closeAndWait(t)
 			assertResponsesWSAccounting(t, fixture, []int{1000, 1000})
+			var logs []model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Order("id").Find(&logs).Error)
+			require.Len(t, logs, 2)
+			for index, transport := range []string{"websocket", "http"} {
+				var other struct {
+					ForkExtensions map[string]string `json:"fork_extensions"`
+				}
+				require.NoError(t, common.UnmarshalJsonStr(logs[index].Other, &other))
+				assert.Equal(t, transport, other.ForkExtensions["client_transport"])
+			}
+
 		})
 	}
 }
@@ -1426,5 +1454,1017 @@ func TestResponsesWebSocketPreRoutingRejectionsFollowHealthClassification(t *tes
 			assert.Equal(t, int64(1), requests)
 			assert.Zero(t, successes)
 		})
+	}
+}
+
+func TestResponsesWSCodexWarmupBilling(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		usage    string
+		output   string
+		override bool
+		quota    int
+	}{
+		{name: "zero usage warmup", usage: `{"input_tokens":0,"output_tokens":0,"total_tokens":0}`, output: `[]`},
+		{name: "omitted usage warmup", usage: `null`, output: `[]`},
+		{name: "upstream performed inference", usage: `{"input_tokens":10,"output_tokens":1,"total_tokens":11}`, output: `[]`, quota: 500},
+		{name: "upstream reports total only", usage: `{"total_tokens":10}`, output: `[]`, quota: 500},
+		{name: "upstream produced output", usage: `null`, output: `[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]`, quota: 500},
+		{name: "channel enables generation", usage: `{"input_tokens":0,"output_tokens":0,"total_tokens":0}`, output: `[]`, override: true, quota: 500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.001))`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+					return
+				}
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"warmup","status":"completed","output":`+tc.output+`,"usage":`+tc.usage+`}}`)))
+				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+					return
+				}
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"inference","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)))
+				_, _, _ = ws.ReadMessage()
+			})
+			constant.CountToken = true
+			if tc.override {
+				require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", "responses-ws-upstream").Update("param_override", `{"generate":true}`).Error)
+			}
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"prepare this prompt without generating","generate":false,"stream":true}`)))
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			var quotas []int
+			if tc.quota != 0 {
+				quotas = append(quotas, tc.quota)
+			}
+			assertResponsesWSAccounting(t, fixture, quotas)
+			// The next inference must still be billed, using the warmup response.
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","previous_response_id":"warmup","input":[],"stream":true}`)))
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			assertResponsesWSAccounting(t, fixture, append(quotas, 500))
+			assert.Equal(t, int32(1), fixture.connections.Load())
+		})
+	}
+}
+
+func TestResponsesWSCodexWrappedErrorRetainsRecoveryMetadata(t *testing.T) {
+	for _, field := range []string{"status", "status_code"} {
+		t.Run(field, func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, `tier("base", p * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+					return
+				}
+				payload := `{"type":"error","` + field + `":429,"headers":{"retry-after":"12","x-codex-plan-type":"plus"},"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"try later"}}`
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(payload)))
+				_, _, _ = ws.ReadMessage()
+			})
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"hello","stream":true}`)))
+			event := readResponsesWSTestEvent(t, fixture.client)
+			t.Logf("client error event: %#v", event)
+			assert.Equal(t, float64(429), event[field])
+			assert.Equal(t, map[string]any{"retry-after": "12", "x-codex-plan-type": "plus"}, event["headers"])
+		})
+	}
+}
+
+func TestResponsesWSCodexInterruptedWarmupBilling(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		end    string
+		output bool
+	}{
+		{name: "upstream disconnect", end: "upstream"},
+		{name: "client disconnect", end: "client"},
+		{name: "error after created", end: "error"},
+		{name: "failed terminal", end: "failed"},
+		{name: "generated output before error", end: "error", output: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.001))`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+					return
+				}
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"warmup","status":"in_progress","output":[]}}`)))
+				if tc.output {
+					assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_text.delta","delta":"hello"}`)))
+				}
+				switch tc.end {
+				case "upstream":
+					return
+				case "error":
+					assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status_code":429,"headers":{"retry-after":"12"},"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"retry"}}`)))
+				case "failed":
+					assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.failed","response":{"id":"warmup","status":"failed","output":[]}}`)))
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"prepare this prompt without generating","generate":false,"stream":true}`)))
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			if tc.output {
+				require.Equal(t, "response.output_text.delta", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			if tc.end == "error" {
+				event := readResponsesWSTestEvent(t, fixture.client)
+				require.Equal(t, "error", event["type"])
+				assert.Equal(t, float64(429), event["status_code"])
+				assert.Equal(t, map[string]any{"retry-after": "12"}, event["headers"])
+				// An attributed terminal ends this request; upstream policy keeps the session reusable.
+			} else if tc.end == "failed" {
+				require.Equal(t, "response.failed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			fixture.closeAndWait(t)
+			var quotas []int
+			if tc.output {
+				quotas = []int{500}
+			}
+			assertResponsesWSAccounting(t, fixture, quotas)
+		})
+	}
+}
+
+func TestResponsesWebSocketReusesSameModelAndReconnectsOnModelSwitch(t *testing.T) {
+	received := make(chan map[string]any, 3)
+	var responses atomic.Int32
+	fixture := newResponsesWSBillingTest(t, `tier("base", p * 2)`, func(ws *websocket.Conn, request *http.Request) {
+		assert.Contains(t, request.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate")
+		assert.Equal(t, "responses_websockets=2026-02-06", request.Header.Get("OpenAI-Beta"))
+		for {
+			_, payload, err := ws.ReadMessage()
+			if err != nil {
+				return
+			}
+			var event map[string]any
+			if !assert.NoError(t, common.Unmarshal(payload, &event)) {
+				return
+			}
+			received <- event
+			response := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%d","status":"completed","usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}`, responses.Add(1))
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(response))) {
+				return
+			}
+		}
+	})
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": `{"ws-billing":"tiered_expr","ws-billing-next":"tiered_expr"}`,
+		"billing_setting.billing_expr": `{"ws-billing":"tier(\"base\", p * 2)","ws-billing-next":"tier(\"base\", p * 2)"}`,
+	}))
+	var channel model.Channel
+	require.NoError(t, model.DB.Where("name = ?", "responses-ws-upstream").First(&channel).Error)
+	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: "ws-billing-next", Group: "default", Enabled: true}).Error)
+	for index, payload := range []string{
+		`{"type":"response.create","model":"ws-billing","input":"first"}`,
+		`{"type":"response.create","model":"ws-billing","input":"second"}`,
+		`{"type":"response.create","model":"ws-billing-next","input":"third","previous_response_id":"resp_2"}`,
+	} {
+		require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(payload)))
+		event := readResponsesWSTestEvent(t, fixture.client)
+		require.Equal(t, "response.completed", event["type"], "%v", event)
+		forwarded := <-received
+		if index < 2 {
+			assert.Equal(t, int32(1), fixture.connections.Load())
+			assert.Equal(t, "gpt-4o", forwarded["model"])
+		} else {
+			assert.Equal(t, int32(2), fixture.connections.Load())
+			assert.Equal(t, "ws-billing-next", forwarded["model"])
+			assert.Equal(t, "resp_2", forwarded["previous_response_id"])
+		}
+	}
+	assertResponsesWSAccounting(t, fixture, []int{100, 100, 100})
+}
+
+func TestResponsesWSCodexInterruptAndContinuation(t *testing.T) {
+	fixture := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+		if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+			return
+		}
+		if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-interrupted","status":"in_progress"}}`))) {
+			return
+		}
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			return
+		}
+		assert.JSONEq(t, `{"type":"response.interrupt","response_id":"resp-interrupted","mode":"discard_partial_items"}`, string(data))
+		for _, event := range []string{
+			`{"type":"response.interrupt.accepted","response_id":"resp-interrupted"}`,
+			`{"type":"response.output_item.interrupted","response_id":"resp-interrupted","item_id":"reason-1","output_index":0}`,
+			`{"type":"response.incomplete","response":{"id":"resp-interrupted","status":"incomplete","incomplete_details":{"reason":"interrupted"},"usage":{"input_tokens":1000,"output_tokens":10}}}`,
+		} {
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(event))) {
+				return
+			}
+		}
+		_, continuation, err := ws.ReadMessage()
+		if err != nil {
+			return
+		}
+		var request map[string]any
+		if !assert.NoError(t, common.Unmarshal(continuation, &request)) {
+			return
+		}
+		assert.Equal(t, "resp-interrupted", request["previous_response_id"])
+		assert.Equal(t, "gpt-4o", request["model"])
+		if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-next","status":"completed","usage":{"input_tokens":100,"output_tokens":2}}}`))) {
+			return
+		}
+		_, _, _ = ws.ReadMessage()
+	})
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+	require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"resp-interrupted","mode":"discard_partial_items"}`)))
+	for _, eventType := range []string{"response.interrupt.accepted", "response.output_item.interrupted", "response.incomplete"} {
+		event := readResponsesWSTestEvent(t, fixture.client)
+		require.Equal(t, eventType, event["type"], "interrupt result: %#v", event)
+	}
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","previous_response_id":"resp-interrupted","input":[]}`)))
+	require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+	assert.Equal(t, int32(1), fixture.connections.Load())
+	fixture.closeAndWait(t)
+	assertResponsesWSAccounting(t, fixture, []int{1000, 100})
+}
+
+func TestResponsesWSCodexNumericResponseEffortPreservesUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		typeLast, warmup bool
+	}{
+		{name: "generation"},
+		{name: "type after response", typeLast: true},
+		{name: "empty prewarm", warmup: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			usage := `{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}`
+			generate := "true"
+			if tc.warmup {
+				usage = `{"input_tokens":0,"output_tokens":0,"total_tokens":0}`
+				generate = "false"
+			}
+			response := `{"id":"resp-numeric","status":"completed","reasoning":{"effort":8192},"usage":` + usage + `}`
+			terminal := `{"type":"response.completed","response":` + response + `}`
+			if tc.typeLast {
+				terminal = `{"response":` + response + `,"type":"response.completed"}`
+			}
+			fixture := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+					return
+				}
+				for _, body := range []string{
+					`{"type":"response.created","response":{"id":"resp-numeric","status":"in_progress","reasoning":{"effort":8192}}}`,
+					terminal,
+				} {
+					if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(body))) {
+						return
+					}
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			constant.CountToken = true
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"hello","reasoning":{"effort":8192},"generate":`+generate+`}`)))
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			_, forwarded, err := fixture.client.ReadMessage()
+			require.NoError(t, err)
+			assert.Equal(t, terminal, string(forwarded), "accounting decode must not rewrite the upstream frame")
+			fixture.closeAndWait(t)
+			if tc.warmup {
+				assertResponsesWSAccounting(t, fixture, nil)
+				return
+			}
+			assertResponsesWSAccounting(t, fixture, []int{1000})
+			var logs []model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Find(&logs).Error)
+			require.Len(t, logs, 1)
+			assert.Equal(t, 1000, logs[0].PromptTokens)
+			assert.Equal(t, 10, logs[0].CompletionTokens)
+		})
+	}
+}
+
+func TestResponsesWSAffinityTemplateSurvivesReuse(t *testing.T) {
+	received := make(chan map[string]any, 5)
+	fixture := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+		for index := range 5 {
+			_, data, err := ws.ReadMessage()
+			if err != nil {
+				return
+			}
+			var event map[string]any
+			if !assert.NoError(t, common.Unmarshal(data, &event)) {
+				return
+			}
+			received <- event
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-%d","status":"completed","usage":{"input_tokens":10,"output_tokens":1}}}`, index)))) {
+				return
+			}
+		}
+		_, _, _ = ws.ReadMessage()
+	})
+	setting := operation_setting.GetChannelAffinitySetting()
+	previous := *setting
+	t.Cleanup(func() { *setting = previous })
+	snapshot, err := model.BuildRequestPolicy(map[string]string{
+		"channel_affinity_setting.enabled":      "true",
+		"channel_affinity_setting.session_mode": "prefer",
+		"channel_affinity_setting.rules":        `[{"name":"audit-template","model_regex":[".*"],"key_sources":[{"type":"gjson","path":"prompt_cache_key"}],"param_override_template":{"service_tier":"priority"}}]`,
+	})
+	require.NoError(t, err)
+	*setting = snapshot.Affinity
+	for index, tc := range []struct {
+		key  string
+		tier any
+	}{
+		{key: "review2-template", tier: "priority"},
+		{key: "review2-template", tier: "priority"},
+		{key: "review2-template", tier: "flex"},
+		{key: "", tier: nil},
+		{key: "review2-template", tier: "default"},
+	} {
+		if index == 2 {
+			setting.Rules[0].ParamOverrideTemplate = map[string]any{"service_tier": "flex"}
+		}
+		if index == 4 {
+			require.NoError(t, model.DB.Model(fixture.channel).Update("param_override", `{"service_tier":"default"}`).Error)
+		}
+		payload := fmt.Sprintf(`{"type":"response.create","model":"ws-billing","input":[],"prompt_cache_key":%q}`, tc.key)
+		require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(payload)))
+		require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+		event := <-received
+		assert.Equal(t, tc.tier, event["service_tier"], "request %d must use the current rule and channel overrides", index)
+	}
+	assert.Equal(t, int32(1), fixture.connections.Load())
+
+}
+
+func TestResponsesWSLateInterruptDoesNotPoisonNextRequest(t *testing.T) {
+	fixture := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+		for index := range 2 {
+			_, _, err := ws.ReadMessage()
+			if err != nil {
+				return
+			}
+
+			if index == 1 {
+				if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`))) {
+					return
+				}
+				_, control, err := ws.ReadMessage()
+				if err != nil {
+					return
+				}
+				assert.JSONEq(t, `{"type":"response.interrupt","response_id":"resp-1","mode":"discard_partial_items"}`, string(control), "a stale interrupt must not reach the newer response")
+			}
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-%d","status":"completed","usage":{"input_tokens":10,"output_tokens":1}}}`, index)))) {
+				return
+			}
+		}
+		_, _, _ = ws.ReadMessage()
+	})
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+	require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+	// Reproduce the wire ordering when the server has finished but the client
+	// selects an interrupt before consuming the buffered completion.
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"resp-0","mode":"discard_partial_items"}`)))
+	ack := readResponsesWSTestEvent(t, fixture.client)
+	assert.Equal(t, "response.interrupt.accepted", ack["type"])
+	assert.Equal(t, "resp-0", ack["response_id"])
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","previous_response_id":"resp-0","input":[]}`)))
+
+	require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+	for _, id := range []string{"resp-0", "resp-1"} {
+		require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.interrupt","response_id":%q,"mode":"discard_partial_items"}`, id))))
+		if id == "resp-0" {
+			ack = readResponsesWSTestEvent(t, fixture.client)
+			assert.Equal(t, "response.interrupt.accepted", ack["type"])
+			assert.Equal(t, id, ack["response_id"])
+		}
+	}
+	require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"unknown","mode":"discard_partial_items"}`)))
+	unknown := readResponsesWSTestEvent(t, fixture.client)
+	assert.Equal(t, "error", unknown["type"])
+	assert.Equal(t, float64(http.StatusBadRequest), unknown["status"])
+	assert.Equal(t, int32(1), fixture.connections.Load())
+	fixture.closeAndWait(t)
+	assertResponsesWSAccounting(t, fixture, []int{10, 10})
+}
+
+func TestResponsesWSInterruptDuringFinalization(t *testing.T) {
+	for _, scenario := range []string{"queued", "forwarded", "unknown response"} {
+		t.Run(scenario, func(t *testing.T) {
+			finalizing, release := make(chan struct{}), make(chan struct{})
+			fixture := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); err != nil {
+					return
+				}
+				if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-finalizing","status":"in_progress"}}`))) {
+					return
+				}
+				if scenario == "forwarded" {
+					_, control, err := ws.ReadMessage()
+					if !assert.NoError(t, err) {
+						return
+					}
+					assert.JSONEq(t, `{"type":"response.interrupt","response_id":"resp-finalizing","mode":"discard_partial_items"}`, string(control))
+					if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt.accepted","response_id":"resp-finalizing"}`))) {
+						return
+					}
+				}
+				if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-finalizing","status":"completed","usage":{"input_tokens":10,"output_tokens":1}}}`))) {
+					return
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			var releaseOnce sync.Once
+			defer func() {
+				releaseOnce.Do(func() { close(release) })
+				fixture.closeAndWait(t)
+			}()
+			// Block real settlement after the terminal was consumed but before
+			// request ownership is released. No sleeps or production test hooks.
+			callback := "test:responses_ws_finalization"
+			require.NoError(t, model.LOG_DB.Callback().Create().After("gorm:create").Register(callback, func(tx *gorm.DB) {
+				if log, ok := tx.Statement.Dest.(*model.Log); ok && log.Type == model.LogTypeConsume {
+					close(finalizing)
+					<-release
+				}
+			}))
+			t.Cleanup(func() { require.NoError(t, model.LOG_DB.Callback().Create().Remove(callback)) })
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			if scenario == "forwarded" {
+				require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"resp-finalizing","mode":"discard_partial_items"}`)))
+				ack := readResponsesWSTestEvent(t, fixture.client)
+				require.Equal(t, "response.interrupt.accepted", ack["type"])
+				assert.Equal(t, "resp-finalizing", ack["response_id"])
+			}
+			select {
+			case <-finalizing:
+			case <-time.After(3 * time.Second):
+				t.Fatal("request did not reach finalization")
+			}
+			if scenario != "forwarded" {
+				id := "resp-finalizing"
+				if scenario == "unknown response" {
+					id = "unknown"
+				}
+				require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.interrupt","response_id":%q,"mode":"discard_partial_items"}`, id))))
+			}
+			// A FIFO barrier proves the socket reader admitted the interrupt.
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"test.barrier"}`)))
+			require.Equal(t, "error", readResponsesWSTestEvent(t, fixture.client)["type"])
+			releaseOnce.Do(func() { close(release) })
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			if scenario != "forwarded" {
+				ack := readResponsesWSTestEvent(t, fixture.client)
+				if scenario == "queued" {
+					require.Equal(t, "response.interrupt.accepted", ack["type"])
+					assert.Equal(t, "resp-finalizing", ack["response_id"])
+				} else {
+					assert.Equal(t, "error", ack["type"])
+					assert.Equal(t, float64(http.StatusBadRequest), ack["status"])
+				}
+			}
+			// No duplicate confirmation may remain to poison the next stream.
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"test.barrier"}`)))
+			require.Equal(t, "error", readResponsesWSTestEvent(t, fixture.client)["type"])
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, []int{10})
+		})
+	}
+}
+
+func TestResponsesWSCustomToolDeltaAccounting(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind string
+		completed  bool
+		quota      int
+	}{
+		{"function interrupted", "response.function_call_arguments.delta", false, 1},
+		{"custom interrupted", "response.custom_tool_call_input.delta", false, 1},
+		{"custom completed usage", "response.custom_tool_call_input.delta", true, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, `tier("output", c * 2)`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); err != nil {
+					return
+				}
+				frames := []string{`{"type":"response.created","response":{"id":"partial","status":"in_progress"}}`, fmt.Sprintf(`{"type":%q,"item_id":"tool1","delta":"hello"}`, tc.kind)}
+				if tc.completed {
+					frames = append(frames, `{"type":"response.completed","response":{"id":"partial","status":"completed","usage":{"input_tokens":10,"output_tokens":7}}}`)
+				}
+				for _, frame := range frames {
+					if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(frame))) {
+						return
+					}
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"hi","max_output_tokens":10}`)))
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			require.Equal(t, tc.kind, readResponsesWSTestEvent(t, fixture.client)["type"])
+			if tc.completed {
+				require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, []int{tc.quota})
+		})
+	}
+}
+
+func TestResponsesWSReuseStrictBinding(t *testing.T) {
+	fixture := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+		for i := range 2 {
+			if _, _, err := ws.ReadMessage(); err != nil {
+				return
+			}
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-%d","status":"completed","usage":{"input_tokens":10,"output_tokens":1}}}`, i)))) {
+				return
+			}
+		}
+		_, _, _ = ws.ReadMessage()
+	})
+	// Affinity caches outlive fixtures; use memory instead of retaining a fixture Redis client.
+	common.RedisEnabled = false
+	affinity := operation_setting.GetChannelAffinitySetting()
+	previous := *affinity
+	t.Cleanup(func() { *affinity = previous })
+	snapshot, err := model.BuildRequestPolicy(map[string]string{
+		"channel_affinity_setting.enabled": "true", "channel_affinity_setting.session_mode": "strict",
+		"channel_affinity_setting.rules": `[{"name":"audit-strict","model_regex":[".*"],"key_sources":[{"type":"gjson","path":"prompt_cache_key"}],"session_mode":"inherit"}]`,
+	})
+	require.NoError(t, err)
+	*affinity = snapshot.Affinity
+	payload := `{"type":"response.create","model":"ws-billing","input":[],"prompt_cache_key":"audit-strict-key"}`
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(payload)))
+	require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+	other := &model.Channel{Name: "strict-other", Key: "other", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, Group: "default", Models: "ws-billing"}
+	other.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+	require.NoError(t, model.DB.Create(other).Error)
+	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: other.Id, Model: "ws-billing", Group: "default", Enabled: true}).Error)
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Where("channel_id = ?", other.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Delete(other).Error)
+	})
+	seed, _ := gin.CreateTestContext(httptest.NewRecorder())
+	seed.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(payload))
+	service.GetPreferredChannelByAffinity(seed, "ws-billing", "default")
+	t.Cleanup(func() { service.ClearCurrentChannelAffinityCache(seed) })
+	service.RecordChannelAffinity(seed, other.Id)
+	bound, found := service.GetPreferredChannelByAffinity(seed, "ws-billing", "default")
+	require.True(t, found)
+	require.Equal(t, other.Id, bound)
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(payload)))
+	result := readResponsesWSTestEvent(t, fixture.client)
+	assert.Equal(t, "error", result["type"], "must reject a reused socket conflicting with strict binding")
+	bound, found = service.GetPreferredChannelByAffinity(seed, "ws-billing", "default")
+	assert.True(t, found)
+	assert.Equal(t, other.Id, bound, "must preserve the existing strict binding")
+	assert.Equal(t, float64(http.StatusForbidden), result["status"])
+	_, _, err = fixture.client.ReadMessage()
+	assert.True(t, websocket.IsCloseError(err, websocket.ClosePolicyViolation))
+	fixture.closeAndWait(t)
+	assertResponsesWSAccounting(t, fixture, []int{10})
+}
+
+func TestResponsesWSHandshakeRetryAfter(t *testing.T) {
+	fixture := newResponsesWSBillingTest(t, `p * 2`, func(*websocket.Conn, *http.Request) { t.Error("unexpected successful dial") })
+	rejected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.Header().Set("Retry-After-Ms", "60000")
+		w.Header().Set("Set-Cookie", "session=private")
+		w.Header().Set("Authorization", "Bearer private")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"slow down"}}`)
+	}))
+	defer rejected.Close()
+	require.NoError(t, model.DB.Model(fixture.channel).Update("base_url", rejected.URL).Error)
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+	event := readResponsesWSTestEvent(t, fixture.client)
+	require.Equal(t, "error", event["type"])
+	require.Equal(t, float64(429), event["status"])
+	headers, _ := event["headers"].(map[string]any)
+	assert.Equal(t, map[string]any{"retry-after": "60", "retry-after-ms": "60000"}, headers, "only recovery hints may be forwarded")
+}
+
+func TestResponsesWSCompressedUpstreamLimit(t *testing.T) {
+	previous := constant.StreamScannerMaxBufferMB
+	constant.StreamScannerMaxBufferMB = 1
+	t.Cleanup(func() { constant.StreamScannerMaxBufferMB = previous })
+	fixture := newResponsesWSBillingTest(t, `c * 2`, func(ws *websocket.Conn, _ *http.Request) {
+		if _, _, err := ws.ReadMessage(); err != nil {
+			return
+		}
+		if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"large","status":"in_progress"}}`))) {
+			return
+		}
+		payload := `{"type":"response.output_text.delta","delta":"` + strings.Repeat("x", 2<<20) + `"}`
+		if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(payload))) {
+			return
+		}
+		_, _, err := ws.ReadMessage()
+		assert.True(t, websocket.IsCloseError(err, websocket.CloseMessageTooBig), "reject decompressed oversized upstream frame: %v", err)
+	})
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+	require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+	_, _, err := fixture.client.ReadMessage()
+	assert.True(t, websocket.IsCloseError(err, websocket.CloseInternalServerErr), "oversized output must not be forwarded: %v", err)
+	fixture.closeAndWait(t)
+	assertResponsesWSAccounting(t, fixture, []int{0})
+}
+
+func TestResponsesWSRejectedFrameRecorded(t *testing.T) {
+	old := constant.ErrorLogEnabled
+	constant.ErrorLogEnabled = true
+	t.Cleanup(func() { constant.ErrorLogEnabled = old })
+	fixture := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+		if _, _, err := ws.ReadMessage(); err != nil {
+			return
+		}
+		assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":429,"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"slow down"}}`)))
+		_, _, _ = ws.ReadMessage()
+	})
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+	require.Equal(t, "error", readResponsesWSTestEvent(t, fixture.client)["type"])
+	fixture.closeAndWait(t)
+	var logs []model.Log
+	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeError).Find(&logs).Error)
+	require.Len(t, logs, 1, "a rejected upstream response must be visible when error logs are enabled")
+	var other struct {
+		ForkExtensions map[string]string `json:"fork_extensions"`
+		AdminInfo      struct {
+			Policy []service.PolicyEvent `json:"request_policy"`
+		} `json:"admin_info"`
+	}
+	require.NoError(t, common.UnmarshalJsonStr(logs[0].Other, &other))
+	assert.Equal(t, "websocket", other.ForkExtensions["client_transport"])
+	require.NotEmpty(t, other.AdminInfo.Policy)
+	decision := other.AdminInfo.Policy[len(other.AdminInfo.Policy)-1].Decision
+	assert.Equal(t, "stop", decision.Action)
+	assert.Equal(t, "non_retryable_error", decision.Reason)
+	assert.Equal(t, int32(1), fixture.connections.Load(), "a rejected create must not be replayed")
+	assertResponsesWSAccounting(t, fixture, nil)
+}
+
+func TestResponsesWSIncrementalPromptEstimate(t *testing.T) {
+	var estimates []int
+	for _, incremental := range []bool{false, true} {
+		t.Run(fmt.Sprint(incremental), func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+				if incremental {
+					if _, _, err := ws.ReadMessage(); err != nil {
+						return
+					}
+					assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"warmup","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0}}}`)))
+				}
+				if _, _, err := ws.ReadMessage(); err != nil {
+					return
+				}
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"inference","status":"in_progress"}}`)))
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_text.delta","delta":"hello"}`)))
+				_, _, _ = ws.ReadMessage()
+			})
+			constant.CountToken = true
+			payload := `{"type":"response.create","model":"ws-billing","input":[{"role":"user","content":[{"type":"input_text","text":"Explain how websocket connections work and how state is retained across turns"}]}]}`
+			if incremental {
+				warmup := strings.TrimSuffix(payload, "}") + `,"generate":false}`
+				require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(warmup)))
+				require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+				payload = `{"type":"response.create","model":"ws-billing","input":[],"previous_response_id":"warmup"}`
+			}
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(payload)))
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			require.Equal(t, "response.output_text.delta", readResponsesWSTestEvent(t, fixture.client)["type"])
+			fixture.closeAndWait(t)
+			var logs []model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Find(&logs).Error)
+			require.Len(t, logs, 1)
+			estimates = append(estimates, logs[0].PromptTokens)
+			t.Logf("incremental=%v prompt_tokens=%d quota=%d", incremental, logs[0].PromptTokens, logs[0].Quota)
+		})
+	}
+	require.Len(t, estimates, 2)
+	require.Positive(t, estimates[0])
+	assert.Equal(t, estimates[0], estimates[1], "same logical prompt, including the warmed-up input, should not be lost on a usage-less continuation")
+}
+
+func TestResponsesWSContinuationBillingUsesLatestContext(t *testing.T) {
+	tokenID := make(chan int, 1)
+	reservations := make(chan int, 4)
+	fixture := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+		id := <-tokenID
+		for i, usage := range []string{`{"input_tokens":100,"output_tokens":10}`, `{"input_tokens":60,"output_tokens":2}`, `null`, `null`} {
+			if _, _, err := ws.ReadMessage(); err != nil {
+				return
+			}
+			var token model.Token
+			if !assert.NoError(t, model.DB.First(&token, id).Error) {
+				return
+			}
+			reservations <- token.RemainQuota
+			assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"r%d","status":"completed","output":[],"usage":%s}}`, i, usage))))
+		}
+		_, _, _ = ws.ReadMessage()
+	})
+	tokenID <- fixture.token.Id
+	constant.CountToken = true
+	bodies := []string{
+		`{"type":"response.create","model":"ws-billing","input":[],"instructions":"You are helpful"}`,
+		`{"type":"response.create","model":"ws-billing","previous_response_id":"r0","input":[],"instructions":"You are helpful"}`,
+		`{"type":"response.create","model":"ws-billing","previous_response_id":"r1","input":[],"instructions":"You are helpful"}`,
+		`{"type":"response.create","model":"ws-billing","input":[]}`,
+	}
+	for _, body := range bodies {
+		require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(body)))
+		require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+	}
+	fixture.closeAndWait(t)
+	assertResponsesWSAccounting(t, fixture, []int{100, 60, 62, 0})
+	<-reservations // Initial estimate depends on tokenizer and is not this contract.
+	assert.Equal(t, 2790, <-reservations, "reserve prior input+output without repeating instructions")
+	assert.Equal(t, 2778, <-reservations, "actual reduced context replaces the prior estimate")
+	assert.Equal(t, 2778, <-reservations, "a full request without previous_response_id resets context")
+}
+
+func TestResponsesWSHandshakeMetadata(t *testing.T) {
+	fixture := newResponsesWSBillingTest(t, `p * 2`, func(*websocket.Conn, *http.Request) { t.Error("unexpected original upstream") })
+	done := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		headers := http.Header{}
+		headers.Set("OpenAI-Model", "reported-model")
+		headers.Set("X-Codex-Turn-State", "opaque-turn-state")
+		headers.Set("X-Reasoning-Included", "")
+		headers.Set("Set-Cookie", "private-cookie")
+		headers.Set("Authorization", "Bearer private")
+		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, headers)
+		if !assert.NoError(t, err) {
+			return
+		}
+		defer ws.Close()
+		if _, _, err = ws.ReadMessage(); err != nil {
+			return
+		}
+		assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"metadata-test","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`)))
+		_, _, _ = ws.ReadMessage()
+	}))
+	defer upstream.Close()
+	require.NoError(t, model.DB.Model(fixture.channel).Update("base_url", upstream.URL).Error)
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+	event := readResponsesWSTestEvent(t, fixture.client)
+	require.Equal(t, "response.metadata", event["type"], "Codex reads turn_state only from response.metadata")
+	assert.Equal(t, map[string]any{"openai-model": "reported-model", "x-codex-turn-state": "opaque-turn-state", "x-reasoning-included": ""}, event["headers"])
+	require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+	fixture.closeAndWait(t)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("metadata upstream did not close")
+	}
+	assertResponsesWSAccounting(t, fixture, []int{1})
+}
+
+func TestResponsesWSContinuationAfterRejectedAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name, event, kind string
+		quota             []int
+		missing           bool
+	}{
+		{"rate_limit", `{"type":"error","status":429,"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"try again"}}`, "error", []int{100, 110}, false},
+		{"failed_child", `{"type":"response.failed","response":{"id":"failed","status":"failed","error":{"type":"server_error","message":"failed"}}}`, "response.failed", []int{100, 0, 110}, false},
+		{"cancelled_child", `{"type":"response.cancelled","response":{"id":"cancelled","status":"cancelled","usage":{"input_tokens":110,"output_tokens":0}}}`, "response.cancelled", []int{100, 110, 110}, false},
+		{"missing_parent", `{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"expired"}}`, "error", []int{100}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+				for i, event := range []string{
+					`{"type":"response.completed","response":{"id":"base","status":"completed","output":[],"usage":{"input_tokens":100,"output_tokens":10}}}`,
+					tc.event,
+					`{"type":"response.completed","response":{"id":"retried","status":"completed","output":[]}}`,
+				} {
+					if _, _, err := ws.ReadMessage(); err != nil {
+						return
+					}
+					if tc.missing && i == 2 {
+						t.Error("expired parent must no longer infer a model")
+						return
+					}
+					assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(event)))
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			constant.CountToken = true
+			for i, body := range []string{
+				`{"type":"response.create","model":"ws-billing","input":[]}`,
+				`{"type":"response.create","model":"ws-billing","previous_response_id":"base","input":[]}`,
+				`{"type":"response.create","previous_response_id":"base","input":[]}`,
+			} {
+				require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(body)))
+				event := readResponsesWSTestEvent(t, fixture.client)
+				want := "response.completed"
+				if i == 1 {
+					want = tc.kind
+				}
+				if i == 2 && tc.missing {
+					want = "error"
+				}
+				require.Equal(t, want, event["type"])
+			}
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, tc.quota)
+		})
+	}
+}
+
+func TestResponsesWSDiscardedPartialContext(t *testing.T) {
+	const done = `{"type":"response.output_item.done","output_index":0,"item":{"id":"kept","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}`
+	const kept = `[{"id":"kept","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]`
+	for _, tc := range []struct {
+		name, output string
+		events       []string
+		prompt       int
+	}{
+		{"empty", `,"output":[]`, nil, 100},
+		{"retained_terminal", `,"output":` + kept, []string{done}, 101},
+		{"retained_done_fallback", "", []string{done}, 101},
+		{"empty_overrides_done", `,"output":[]`, []string{done}, 100},
+		{"discarded_done", "", []string{done, `{"type":"response.output_item.interrupted","item_id":"kept","output_index":0}`}, 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tokenID := make(chan int, 1)
+			reserved := make(chan int, 1)
+			fixture := newResponsesWSBillingTest(t, `p * 2 + c * 2`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); err != nil {
+					return
+				}
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"interrupted","status":"in_progress"}}`)))
+				_, control, err := ws.ReadMessage()
+				if !assert.NoError(t, err) {
+					return
+				}
+				assert.Contains(t, string(control), `discard_partial_items`)
+				for _, event := range tc.events {
+					assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(event)))
+				}
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.incomplete","response":{"id":"interrupted","status":"incomplete","incomplete_details":{"reason":"interrupted"}`+tc.output+`,"usage":{"input_tokens":100,"output_tokens":50}}}`)))
+				if _, _, err := ws.ReadMessage(); err != nil {
+					return
+				}
+				var token model.Token
+				if !assert.NoError(t, model.DB.First(&token, <-tokenID).Error) {
+					return
+				}
+				reserved <- token.RemainQuota
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"next","status":"completed","output":[]}}`)))
+				_, _, _ = ws.ReadMessage()
+			})
+			tokenID <- fixture.token.Id
+			constant.CountToken = true
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+			require.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"interrupted","mode":"discard_partial_items"}`)))
+			for range tc.events {
+				readResponsesWSTestEvent(t, fixture.client)
+			}
+			require.Equal(t, "response.incomplete", readResponsesWSTestEvent(t, fixture.client)["type"])
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","previous_response_id":"interrupted","input":[]}`)))
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			assert.Equal(t, 3000-150-tc.prompt, <-reserved, "pre-consume must exclude discarded output")
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, []int{150, tc.prompt})
+		})
+	}
+}
+
+func TestResponsesWSStatuslessError(t *testing.T) {
+	for _, accepted := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, fields string
+			status       int
+		}{
+			{"missing", `"error":{"type":"invalid_request_error","code":"invalid_input","message":"bad input","headers":{"retry-after-ms":"50"}}`, 400},
+			{"bare", `"code":"invalid_input","message":"bad input"`, 400},
+			{"alias", `"status_code":429,"error":{"type":"rate_limit_error","message":"slow down"}`, 429},
+		} {
+			t.Run(fmt.Sprintf("%v/%s", accepted, tc.name), func(t *testing.T) {
+				f := newResponsesWSBillingTest(t, `p * 2`, func(ws *websocket.Conn, _ *http.Request) {
+					if _, _, err := ws.ReadMessage(); err != nil {
+						return
+					}
+					if accepted {
+						assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r","status":"in_progress"}}`)))
+					}
+					assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","event_id":"e","headers":{"retry-after":"1"},"future_integer":9007199254740993,`+tc.fields+`}`)))
+					_, _, _ = ws.ReadMessage()
+				})
+				require.NoError(t, f.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+				if accepted {
+					readResponsesWSTestEvent(t, f.client)
+				}
+				require.NoError(t, f.client.SetReadDeadline(time.Now().Add(3*time.Second)))
+				_, raw, err := f.client.ReadMessage()
+				require.NoError(t, err)
+				var event map[string]common.RawMessage
+				require.NoError(t, common.Unmarshal(raw, &event))
+				assert.Equal(t, fmt.Sprint(tc.status), string(event["status"]))
+				assert.Equal(t, `"e"`, string(event["event_id"]))
+				assert.JSONEq(t, `{"retry-after":"1"}`, string(event["headers"]))
+				assert.Equal(t, "9007199254740993", string(event["future_integer"]))
+				require.Contains(t, event, "error")
+				if tc.name == "missing" {
+					assert.Contains(t, string(event["error"]), `"retry-after-ms":"50"`)
+				}
+				f.closeAndWait(t)
+			})
+		}
+	}
+}
+
+func TestResponsesWSMetadataDoesNotAcceptRequest(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		t.Run(fmt.Sprint(closed), func(t *testing.T) {
+			f := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); err != nil {
+					return
+				}
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.metadata","headers":{"x-codex-turn-state":"state"}}`)))
+				if closed {
+					return
+				}
+				assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":429,"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rejected"}}`)))
+				_, _, _ = ws.ReadMessage()
+			})
+			require.NoError(t, f.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+			require.Equal(t, "response.metadata", readResponsesWSTestEvent(t, f.client)["type"])
+			require.Equal(t, "error", readResponsesWSTestEvent(t, f.client)["type"])
+			require.Eventually(t, func() bool {
+				var token model.Token
+				return model.DB.First(&token, f.token.Id).Error == nil && token.RemainQuota == 3000
+			}, 3*time.Second, 10*time.Millisecond, "rejected request must refund its reservation")
+			f.closeAndWait(t)
+			assertResponsesWSAccounting(t, f, nil)
+		})
+	}
+}
+
+func TestResponsesCompletedToolFallback(t *testing.T) {
+	const fn = `{"id":"f","type":"function_call","status":"completed","call_id":"c","name":"test","arguments":"{}"}`
+	const custom = `{"id":"g","type":"custom_tool_call","status":"completed","call_id":"d","name":"test","input":"hello"}`
+	const done = `{"type":"response.output_item.done","output_index":0,"item":` + fn + `}`
+	const doneCustom = `{"type":"response.output_item.done","output_index":1,"item":` + custom + `}`
+	const delta = `{"type":"response.function_call_arguments.delta","item_id":"f","output_index":0,"delta":"{}"}`
+	for _, transport := range []string{"websocket", "http-sse"} {
+		for _, tc := range []struct {
+			name          string
+			events        []string
+			output, usage string
+			tokens        int
+		}{
+			{"function_done", []string{done}, `[` + fn + `]`, "null", 1},
+			{"custom_done", []string{doneCustom}, `[` + custom + `]`, "null", 1},
+			{"terminal_only", nil, `[` + fn + `,` + custom + `]`, "null", 2},
+			{"deltas_and_repeated_done", []string{delta, done, done}, `[` + fn + `]`, "null", 1},
+			{"mixed_text_tool", []string{`{"type":"response.output_text.delta","delta":"hello"}`, done}, `[` + fn + `]`, "null", 2},
+			{"index_then_id", []string{`{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{}"}`, done, doneCustom}, `[` + fn + `,` + custom + `]`, "null", 2},
+			{"id_then_index", []string{`{"type":"response.function_call_arguments.delta","item_id":"f","delta":"{}"}`, done, doneCustom}, `[` + fn + `,` + custom + `]`, "null", 2},
+			{"legacy_delta", []string{`{"type":"response.function_call_arguments.delta","delta":"{}"}`, done, doneCustom}, `[` + fn + `,` + custom + `]`, "null", 2},
+			{"upstream_usage", []string{delta, done}, `[` + fn + `]`, `{"input_tokens":0,"output_tokens":7}`, 7},
+		} {
+			t.Run(transport+"/"+tc.name, func(t *testing.T) {
+				events := append([]string{`{"type":"response.created","response":{"id":"r","status":"in_progress"}}`}, tc.events...)
+				events = append(events, `{"type":"response.completed","response":{"id":"r","status":"completed","output":`+tc.output+`,"usage":`+tc.usage+`}}`)
+				f := newResponsesWSBillingTest(t, `c * 2`, func(ws *websocket.Conn, _ *http.Request) {
+					if _, _, err := ws.ReadMessage(); err != nil {
+						return
+					}
+					for _, event := range events {
+						if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(event))) {
+							return
+						}
+					}
+					_, _, _ = ws.ReadMessage()
+				}, events...)
+				if transport == "websocket" {
+					require.NoError(t, f.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":[]}`)))
+					for range events {
+						readResponsesWSTestEvent(t, f.client)
+					}
+				} else {
+					request, err := http.NewRequest(http.MethodPost, f.gatewayURL+"/v1/responses", strings.NewReader(`{"model":"ws-billing","input":[],"stream":true}`))
+					require.NoError(t, err)
+					request.Header.Set("Authorization", "Bearer sk-"+f.token.Key)
+					request.Header.Set("Content-Type", "application/json")
+					response, err := (&http.Client{Timeout: 3 * time.Second}).Do(request)
+					require.NoError(t, err)
+					_, err = io.ReadAll(response.Body)
+					require.NoError(t, err)
+					require.NoError(t, response.Body.Close())
+					require.Equal(t, http.StatusOK, response.StatusCode)
+					<-f.httpDone
+				}
+				f.closeAndWait(t)
+				assertResponsesWSAccounting(t, f, []int{tc.tokens})
+				var logs []model.Log
+				require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Find(&logs).Error)
+				require.Len(t, logs, 1)
+				assert.Equal(t, tc.tokens, logs[0].CompletionTokens)
+			})
+		}
 	}
 }

@@ -84,6 +84,7 @@ export type LogFilters = CommonLogFilters | DrawingLogFilters | TaskLogFilters
  * Parsed data from the 'other' field in usage logs
  */
 export interface ChannelAffinityInfo {
+  source?: string
   rule_name?: string
   selected_group?: string
   key_source?: string
@@ -115,6 +116,7 @@ export interface ToolSurchargeItem {
 }
 
 export interface LogOtherData {
+  fork_extensions?: { client_transport?: 'http' | 'websocket' }
   admin_info?: {
     request_policy?: PolicyEvent[]
     is_multi_key?: boolean

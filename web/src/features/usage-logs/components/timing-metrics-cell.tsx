@@ -157,6 +157,7 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
 }
 
 interface StreamTpsCellProps {
+  clientTransport?: 'http' | 'websocket'
   isStream: boolean
   compact?: boolean
   /** Task logs are asynchronous jobs; stream vs non-stream does not apply. */
@@ -180,6 +181,9 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
   if (props.isTask) {
     streamLabel = props.isSyncTask ? t('Sync') : t('Async')
   }
+  let protocol: string | undefined
+  if (props.clientTransport === 'websocket') protocol = 'WS'
+  if (props.clientTransport === 'http') protocol = 'HTTP'
 
   return (
     <div
@@ -195,7 +199,7 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
           props.isStream ? 'text-info' : 'text-muted-foreground'
         )}
       >
-        {streamLabel}
+        {protocol ? `${protocol} · ${streamLabel}` : streamLabel}
         {showStreamError && (
           <TooltipProvider>
             <Tooltip>

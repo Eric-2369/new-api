@@ -710,6 +710,18 @@ export function DetailsDialog(props: DetailsDialogProps) {
             />
           )}
 
+          {(other?.fork_extensions?.client_transport === 'http' ||
+            other?.fork_extensions?.client_transport === 'websocket') && (
+            <DetailRow
+              label={t('Transport protocol')}
+              value={
+                other.fork_extensions.client_transport === 'websocket'
+                  ? 'WebSocket'
+                  : 'HTTP'
+              }
+            />
+          )}
+
           {showAdminIp && (
             <DetailRow
               label={t('IP Address')}

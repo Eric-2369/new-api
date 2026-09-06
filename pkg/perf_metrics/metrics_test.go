@@ -58,6 +58,7 @@ func TestStreamOutcomeClassification(t *testing.T) {
 		want Outcome
 	}{
 		{"completed", (*relaycommon.StreamStatus).MarkCompleted, relaycommon.StreamEndReasonEOF, OutcomeSuccess},
+		{"client interrupt", func(s *relaycommon.StreamStatus) { s.MarkIncomplete("interrupted") }, relaycommon.StreamEndReasonDone, OutcomeIgnored},
 		{"business rejection", func(s *relaycommon.StreamStatus) { s.MarkFailed("context_length_exceeded", "", 0) }, relaycommon.StreamEndReasonEOF, OutcomeIgnored},
 		{"service error", func(s *relaycommon.StreamStatus) { s.MarkFailed("server_error", "", 0) }, relaycommon.StreamEndReasonEOF, OutcomeFailure},
 		{"error after completion", func(s *relaycommon.StreamStatus) { s.MarkCompleted(); s.MarkFailed("", "server_error", 0) }, relaycommon.StreamEndReasonEOF, OutcomeFailure},

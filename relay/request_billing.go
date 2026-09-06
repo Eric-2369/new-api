@@ -22,7 +22,7 @@ import (
 // PrepareRequestBilling estimates and reserves one request's charge. Transports
 // provide the current request body through BodyStorage or BillingRequestInput;
 // channel retries retain the resulting billing session and pricing snapshot.
-func PrepareRequestBilling(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
+func PrepareRequestBilling(c *gin.Context, info *relaycommon.RelayInfo, cachedInputTokens ...int) *types.NewAPIError {
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	meta := &types.TokenCountMeta{TokenType: types.TokenTypeTokenizer}
 	if info.Request != nil && (needSensitiveCheck || constant.CountToken) {
@@ -53,6 +53,15 @@ func PrepareRequestBilling(c *gin.Context, info *relaycommon.RelayInfo) *types.N
 	tokens, err := service.EstimateRequestToken(c, meta, info)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeCountTokenFailed)
+	}
+	// A stateful transport may already hold input referenced by this request.
+	// The body remains the current delta for validation, pricing rules and forwarding.
+	if constant.CountToken && len(cachedInputTokens) > 0 && cachedInputTokens[0] > 0 {
+		var clamp *common.QuotaClamp
+		tokens, clamp = common.QuotaFromFloatChecked(float64(tokens) + float64(cachedInputTokens[0]))
+		if clamp != nil {
+			info.QuotaClamp = clamp
+		}
 	}
 	info.SetEstimatePromptTokens(tokens)
 

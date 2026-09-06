@@ -400,6 +400,7 @@ export function useCommonLogsColumns(
 
             const other = parseLogOther(log.other)
             const affinity = other?.admin_info?.channel_affinity
+            const connectionReused = affinity?.source === 'websocket_connection'
             const rawUseChannel = other?.admin_info?.use_channel ?? []
             const useChannel = Array.isArray(rawUseChannel)
               ? rawUseChannel.map(String).filter(Boolean)
@@ -478,9 +479,22 @@ export function useCommonLogsColumns(
                           </PopoverContent>
                         </Popover>
                       )}
-                      {affinity && (
+                      {connectionReused && (
+                        <span
+                          role='img'
+                          aria-label={t('WebSocket connection reused')}
+                          className='absolute -top-1 -right-1 leading-none text-amber-500'
+                        >
+                          <Sparkles
+                            aria-hidden='true'
+                            className='size-3 fill-current'
+                          />
+                        </span>
+                      )}
+                      {affinity && !connectionReused && (
                         <button
                           type='button'
+                          aria-label={t('Channel Affinity')}
                           className='absolute -top-1 -right-1 leading-none text-amber-500'
                           onClick={(e) => {
                             e.stopPropagation()
@@ -525,7 +539,9 @@ export function useCommonLogsColumns(
                         <div className='border-t pt-1 text-xs'>
                           <p className='font-medium'>{t('Channel Affinity')}</p>
                           <p>
-                            {t('Rule')}: {affinity.rule_name || '-'}
+                            {connectionReused
+                              ? t('WebSocket connection reused')
+                              : `${t('Rule')}: ${affinity.rule_name || '-'}`}
                           </p>
                           <p>
                             {t('Group')}:{' '}
@@ -692,7 +708,7 @@ export function useCommonLogsColumns(
       },
       {
         accessorKey: 'is_stream',
-        header: t('Stream'),
+        header: t('Transport'),
         cell: ({ row }) => {
           const log = row.original
           if (!isTimingLogType(log.type)) return null
@@ -705,7 +721,9 @@ export function useCommonLogsColumns(
               : 0
           const generationTime = useTime - firstTokenTime
           const generationTokens =
-            firstTokenTime > 0 ? log.completion_tokens - 1 : log.completion_tokens
+            firstTokenTime > 0
+              ? log.completion_tokens - 1
+              : log.completion_tokens
           const tokensPerSecond =
             generationTime > 0 && generationTokens > 0
               ? generationTokens / generationTime
@@ -713,6 +731,7 @@ export function useCommonLogsColumns(
 
           return (
             <StreamTpsCell
+              clientTransport={other?.fork_extensions?.client_transport}
               isStream={log.is_stream}
               isTask={other?.is_task === true}
               isSyncTask={other?.task_sync === true}
@@ -721,7 +740,7 @@ export function useCommonLogsColumns(
             />
           )
         },
-        meta: { label: t('Stream') },
+        meta: { label: t('Transport') },
       },
       {
         accessorKey: 'prompt_tokens',

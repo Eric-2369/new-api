@@ -501,3 +501,27 @@ test.each(['missing schema', 'unsupported expression', 'unknown tier'])(
     )
   }
 )
+
+test.each([
+  ['http', 'HTTP'],
+  ['websocket', 'WebSocket'],
+  [undefined, undefined],
+] as const)(
+  'shows transport details for %s without guessing old logs',
+  async (transport, label) => {
+    const trigger = renderPreview(
+      { model_price: 0.25, fork_extensions: { client_transport: transport } },
+      false
+    )
+    fireEvent.click(trigger)
+    const dialog = await screen.findByRole('dialog')
+    if (label) {
+      expect(within(dialog).getByText('Transport protocol')).toBeVisible()
+      expect(within(dialog).getByText(label)).toBeVisible()
+    } else {
+      expect(
+        within(dialog).queryByText('Transport protocol')
+      ).not.toBeInTheDocument()
+    }
+  }
+)
