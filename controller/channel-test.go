@@ -109,6 +109,10 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		}
 	}
 
+	if channel.Type == constant.ChannelTypeAsterGate {
+		return testAsterGateChannel(ctx, channel, testModel, isStream)
+	}
+
 	endpointType = normalizeChannelTestEndpoint(channel, endpointType)
 
 	requestPath := "/v1/chat/completions"
@@ -924,6 +928,9 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 	tik := time.Now()
 	result := testChannel(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel))
 	milliseconds := time.Since(tik).Milliseconds()
+	if errors.Is(result.localErr, errAsterGateProbeRestricted) {
+		return summary
+	}
 	if ctx.Err() != nil {
 		return summary
 	}

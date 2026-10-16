@@ -7338,6 +7338,18 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V 4",
-    "Zoom": "ズーム"
+    "Zoom": "ズーム",
+    "5-hour usage": "5時間の使用状況",
+    "AsterGate": "AsterGate",
+    "AsterGate requires Claude Code; this channel test is skipped. Verify with Claude Code.": "AsterGate は Claude Code のみ許可しているため、チャネルテストをスキップしました。Claude Code で確認してください。",
+    "Bind this upstream key to one direct Claude account to share usage": "使用状況を共有するには、上流キーを直接接続の Claude アカウント1つに紐付けてください",
+    "Forward Claude requests unchanged to AsterGate": "Claude リクエストを変更せず AsterGate に転送",
+    "Invalid AsterGate channel configuration": "AsterGate の設定が無効です。URL を確認し、モデル変換・各種上書き・TLS 検証のスキップを無効にしてください",
+    "No recent upstream usage observation is available": "上流の最近の使用状況データはありません",
+    "Reset time": "リセット時刻",
+    "Shared upstream account usage, not usage of this key alone": "上流アカウント全体の使用状況です。このキー単独の使用量ではありません",
+    "The bound upstream account is unavailable or not authorized for this key": "紐付けられた上流アカウントは利用できないか、このキーでのアクセスが許可されていません",
+    "Usage sharing is disabled for this upstream key": "この上流キーの使用状況共有は無効です",
+    "Weekly usage": "週間の使用状況"
   }
 }

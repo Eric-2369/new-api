@@ -92,8 +92,10 @@ func SetRelayRouter(router *gin.Engine) {
 		httpRouter.Use(middleware.Distribute())
 
 		// claude related routes
-		// TODO: /messages/count_tokens is disabled. The current controller.CountClaudeTokens
-		// httpRouter.POST("/messages/count_tokens", controller.CountClaudeTokens)
+		// Token counting is forwarded only for AsterGate channels.
+		if constant.AsterGateEnabled() {
+			httpRouter.POST("/messages/count_tokens", controller.CountAsterGateTokens)
+		}
 		httpRouter.POST("/messages", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatClaude)
 		})

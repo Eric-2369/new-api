@@ -95,6 +95,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			service.RecordRequestPolicyTermination(c, newAPIError)
 			logger.LogError(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
+			if c.GetBool("astergate_response_committed") {
+				return
+			}
 			upstreamURLs := common.UpstreamAddresses(c)
 			if relayFormat != types.RelayFormatOpenAIRealtime && c.Writer.Written() &&
 				strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
@@ -152,7 +155,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}()
 
 	generalSettings := operation_setting.GetGeneralSetting()
-	if relayFormat == types.RelayFormatClaude && relayInfo.IsStream && generalSettings.PingIntervalEnabled {
+	if relayFormat == types.RelayFormatClaude && relayInfo.IsStream && generalSettings.PingIntervalEnabled &&
+		common.GetContextKeyInt(c, constant.ContextKeyChannelType) != constant.ChannelTypeAsterGate {
 		stopKeepAlive := helper.StartStreamKeepAlive(c, time.Duration(generalSettings.PingIntervalSeconds)*time.Second)
 		defer stopKeepAlive()
 	}
@@ -207,7 +211,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		case types.RelayFormatOpenAIRealtime:
 			newAPIError = relay.WssHelper(c, relayInfo)
 		case types.RelayFormatClaude:
-			newAPIError = relay.ClaudeHelper(c, relayInfo)
+			if channel.Type == constant.ChannelTypeAsterGate {
+				newAPIError = relay.AsterGateClaudeHelper(c, relayInfo)
+			} else {
+				newAPIError = relay.ClaudeHelper(c, relayInfo)
+			}
 		case types.RelayFormatGemini:
 			newAPIError = geminiRelayHandler(c, relayInfo)
 		default:
@@ -227,7 +235,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 
-		if decision.Action != "retry" {
+		if c.GetBool("astergate_response_committed") || decision.Action != "retry" {
 			break
 		}
 	}

@@ -90,3 +90,9 @@ channel.upstream_update_added_models: "新增模型示例（展示 {{.Shown}}/{{
 channel.upstream_update_removed_models: "删除模型示例（展示 {{.Shown}}/{{.Total}}）：{{.Models}}"
 channel.upstream_update_failed_channels: "失败渠道 ID（展示 {{.Shown}}/{{.Total}}）：{{.Ids}}"
 channel.upstream_update_more_omitted: "（其余 {{.Count}} 个已省略）"
+
+# Local AsterGate extension
+astergate.invalid_request: "AsterGate 请求无效：必须提供 model 和 messages"
+astergate.max_tokens: "AsterGate 请求的 max_tokens 值无效"
+astergate.transport: "AsterGate 传输配置无效"
+astergate.upstream: "AsterGate 上游请求失败"

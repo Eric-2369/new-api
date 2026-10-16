@@ -217,6 +217,7 @@ type RelayInfo struct {
 	// the request boundary, independently of billing success or failure.
 	PerformanceOutputTokens      int64
 	PerformanceBusinessRejection bool
+	AsterGatePerformance         *AsterGatePerformance
 
 	// convOptions caches the converter settings snapshot (see ConvOptions).
 	convOptions *convmeta.Options

@@ -116,7 +116,16 @@ export interface ToolSurchargeItem {
 }
 
 export interface LogOtherData {
-  fork_extensions?: { client_transport?: 'http' | 'websocket' }
+  fork_extensions?: {
+    client_transport?: 'http' | 'websocket'
+    astergate_performance?: {
+      duration_ms: number
+      generation_ms: number
+      output_tokens: number
+      thinking_tokens: number
+      basis: 'generation' | 'end_to_end' | 'after_first_content'
+    }
+  }
   admin_info?: {
     request_policy?: PolicyEvent[]
     is_multi_key?: boolean

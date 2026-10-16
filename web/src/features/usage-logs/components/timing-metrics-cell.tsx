@@ -157,6 +157,9 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
 }
 
 interface StreamTpsCellProps {
+  astergatePerformance?: NonNullable<
+    LogOtherData['fork_extensions']
+  >['astergate_performance']
   clientTransport?: 'http' | 'websocket'
   isStream: boolean
   compact?: boolean
@@ -171,12 +174,20 @@ interface StreamTpsCellProps {
 
 export function StreamTpsCell(props: StreamTpsCellProps) {
   const { t } = useTranslation()
+  const performance = props.astergatePerformance
+  let tokensPerSecond = props.tokensPerSecond
+  if (performance) {
+    tokensPerSecond =
+      performance.basis === 'generation' &&
+      performance.generation_ms > 0 &&
+      performance.output_tokens > 0
+        ? (performance.output_tokens * 1000) / performance.generation_ms
+        : null
+  }
   const showStreamError =
     props.isStream && props.streamStatus && props.streamStatus.status !== 'ok'
   const tpsLabel =
-    props.tokensPerSecond != null
-      ? `${Math.round(props.tokensPerSecond)} t/s`
-      : '—'
+    tokensPerSecond != null ? `${Math.round(tokensPerSecond)} t/s` : '—'
   let streamLabel = props.isStream ? t('Stream') : t('Non-stream')
   if (props.isTask) {
     streamLabel = props.isSyncTask ? t('Sync') : t('Async')
@@ -223,8 +234,7 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
           </TooltipProvider>
         )}
       </span>
-      {(!props.compact ||
-        (props.isStream && props.tokensPerSecond != null)) && (
+      {(!props.compact || (props.isStream && tokensPerSecond != null)) && (
         <span className='text-muted-foreground/60 px-0.5 tabular-nums'>
           {tpsLabel}
         </span>

@@ -555,6 +555,9 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		logTaskPluginChannelDecision(c, nil, modelName, "channel_rejected", "nil_channel")
 		return types.NewError(errors.New("channel is nil"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
+	if channel.Type == constant.ChannelTypeAsterGate && !constant.AsterGateEnabled() {
+		return types.NewError(errors.New("channel is disabled"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+	}
 	if expectedPlugin != "" && !channelMatchesExpectedTaskPlugin(c, channel, expectedPlugin) {
 		logTaskPluginChannelDecision(c, channel, modelName, "channel_rejected", "identity_mismatch")
 		return types.NewError(

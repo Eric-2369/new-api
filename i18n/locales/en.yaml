@@ -89,3 +89,9 @@ channel.upstream_update_added_models: "Added model examples (showing {{.Shown}}/
 channel.upstream_update_removed_models: "Removed model examples (showing {{.Shown}}/{{.Total}}): {{.Models}}"
 channel.upstream_update_failed_channels: "Failed channel IDs (showing {{.Shown}}/{{.Total}}): {{.Ids}}"
 channel.upstream_update_more_omitted: " ({{.Count}} more omitted)"
+
+# Local AsterGate extension
+astergate.invalid_request: "Invalid AsterGate request: model and messages are required"
+astergate.max_tokens: "Invalid AsterGate max_tokens value"
+astergate.transport: "Invalid AsterGate transport configuration"
+astergate.upstream: "AsterGate upstream request failed"

@@ -61,8 +61,10 @@ import {
 import { truncateText } from '@/lib/utils'
 
 import { getCodexUsage, updateChannelBalance } from '../api'
+import { AsterGateAccountDialog } from '../astergate/account-dialog'
 import {
   CHANNEL_STATUS_CONFIG,
+  CHANNEL_TYPE_ASTERGATE,
   CHANNEL_TYPE_TASK_PLUGIN,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
@@ -350,6 +352,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   const [rawBalanceResponse, setRawBalanceResponse] = useState<string | null>(
     null
   )
+  const [asterGateOpen, setAsterGateOpen] = useState(false)
   const [codexUsageOpen, setCodexUsageOpen] = useState(false)
   const [codexUsageResponse, setCodexUsageResponse] =
     useState<CodexUsageDialogData | null>(null)
@@ -439,6 +442,10 @@ export function BalanceCell({ channel }: { channel: Channel }) {
     channel.type === CHANNEL_TYPE_SGLANG ? t('SGLang status') : t('vLLM status')
 
   const handleClickUpdate = async () => {
+    if (channel.type === CHANNEL_TYPE_ASTERGATE) {
+      setAsterGateOpen(true)
+      return
+    }
     if (isInferenceChannel) {
       setCurrentRow(channel)
       setOpen('inference-status')
@@ -495,7 +502,10 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   let remainingBadgeLabel = sensitiveVisible ? remainingDisplay : SENSITIVE_MASK
   if (sensitiveVisible && isUpdating) {
     remainingBadgeLabel = t('Updating...')
-  } else if (sensitiveVisible && channel.type === 57) {
+  } else if (
+    sensitiveVisible &&
+    (channel.type === 57 || channel.type === CHANNEL_TYPE_ASTERGATE)
+  ) {
     remainingBadgeLabel = t('Account Info')
   } else if (sensitiveVisible && isInferenceChannel) {
     remainingBadgeLabel = inferenceStatusLabel
@@ -503,13 +513,19 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   let remainingTooltipLabel = remainingLabel
   if (!sensitiveVisible) {
     remainingTooltipLabel = maskedRemainingLabel
+  } else if (channel.type === CHANNEL_TYPE_ASTERGATE) {
+    remainingTooltipLabel = t('Account Info')
   } else if (channel.type === 57) {
     remainingTooltipLabel = t('Click to view Codex usage')
   } else if (isInferenceChannel) {
     remainingTooltipLabel = inferenceStatusLabel
   }
   let remainingBadgeVariant: StatusBadgeProps['variant'] = variant
-  if (channel.type === 57 || isInferenceChannel) {
+  if (
+    channel.type === 57 ||
+    channel.type === CHANNEL_TYPE_ASTERGATE ||
+    isInferenceChannel
+  ) {
     remainingBadgeVariant = 'info'
   } else if (isUpdating) {
     remainingBadgeVariant = 'neutral'
@@ -566,13 +582,21 @@ export function BalanceCell({ channel }: { channel: Channel }) {
           />
           <TooltipContent>
             <p>{remainingTooltipLabel}</p>
-            {channel.type !== 57 && !isInferenceChannel && (
-              <p>{t('Click to update balance')}</p>
-            )}
+            {channel.type !== 57 &&
+              channel.type !== CHANNEL_TYPE_ASTERGATE &&
+              !isInferenceChannel && <p>{t('Click to update balance')}</p>}
           </TooltipContent>
         </Tooltip>
       </div>
 
+      {asterGateOpen && (
+        <AsterGateAccountDialog
+          channelId={channel.id}
+          channelName={sensitiveVisible ? channel.name : SENSITIVE_MASK}
+          open={asterGateOpen}
+          onOpenChange={setAsterGateOpen}
+        />
+      )}
       <CodexUsageDialog
         open={codexUsageOpen}
         onOpenChange={setCodexUsageOpen}

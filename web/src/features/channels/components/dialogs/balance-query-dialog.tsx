@@ -36,6 +36,8 @@ import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
 
 import { getCodexUsage, updateChannelBalance } from '../../api'
+import { AsterGateAccountDialog } from '../../astergate/account-dialog'
+import { CHANNEL_TYPE_ASTERGATE } from '../../constants'
 import { channelsQueryKeys } from '../../lib'
 import { useChannels } from '../channels-provider'
 import {
@@ -146,6 +148,17 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
   const formatDate = (timestamp: number) => {
     if (!timestamp) return 'Never'
     return formatTimestampToDate(timestamp)
+  }
+
+  if (currentRow.type === CHANNEL_TYPE_ASTERGATE) {
+    return (
+      <AsterGateAccountDialog
+        channelId={currentRow.id}
+        channelName={currentRow.name}
+        open={props.open}
+        onOpenChange={props.onOpenChange}
+      />
+    )
   }
 
   if (isCodex) {

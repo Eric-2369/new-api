@@ -129,6 +129,10 @@ func GetStatus(c *gin.Context) {
 		"quota_remind_threshold":      common.QuotaRemindThreshold,
 	}
 
+	if constant.AsterGateEnabled() {
+		data["astergate_enabled"] = true
+	}
+
 	// 根据启用状态注入可选内容
 	if cs.ApiInfoEnabled {
 		data["api_info"] = console_setting.GetApiInfo()

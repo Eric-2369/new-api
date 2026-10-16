@@ -7338,6 +7338,18 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "5-hour usage": "Mức sử dụng trong 5 giờ",
+    "AsterGate": "AsterGate",
+    "AsterGate requires Claude Code; this channel test is skipped. Verify with Claude Code.": "AsterGate chỉ cho phép Claude Code; đã bỏ qua kiểm tra kênh này. Hãy xác minh bằng Claude Code.",
+    "Bind this upstream key to one direct Claude account to share usage": "Liên kết khóa thượng nguồn với một tài khoản Claude trực tiếp để chia sẻ mức sử dụng",
+    "Forward Claude requests unchanged to AsterGate": "Chuyển tiếp nguyên trạng yêu cầu Claude đến AsterGate",
+    "Invalid AsterGate channel configuration": "Cấu hình AsterGate không hợp lệ: kiểm tra URL, tắt ánh xạ, ghi đè và bỏ qua xác minh TLS",
+    "No recent upstream usage observation is available": "Chưa có dữ liệu sử dụng gần đây từ thượng nguồn",
+    "Reset time": "Thời gian đặt lại",
+    "Shared upstream account usage, not usage of this key alone": "Mức sử dụng chung của tài khoản thượng nguồn, không chỉ riêng khóa này",
+    "The bound upstream account is unavailable or not authorized for this key": "Tài khoản thượng nguồn được liên kết không khả dụng hoặc khóa này không được phép truy cập",
+    "Usage sharing is disabled for this upstream key": "Chia sẻ mức sử dụng bị tắt cho khóa thượng nguồn này",
+    "Weekly usage": "Mức sử dụng hàng tuần"
   }
 }

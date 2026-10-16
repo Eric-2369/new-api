@@ -6,7 +6,10 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/controller"
+	"github.com/QuantumNous/new-api/middleware"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -63,4 +66,40 @@ func assertChannelRoutePermission(t *testing.T, method string, path string, perm
 		}
 	}
 	t.Fatalf("route %s %s not found", method, path)
+}
+
+func TestAsterGateUsageRequiresChannelRead(t *testing.T) {
+	t.Setenv("ENABLE_ASTERGATE", "true")
+	assertChannelRoutePermission(t, http.MethodGet, "/:id/astergate/usage", authz.ChannelRead, controller.GetAsterGateChannelUsage)
+	engine := gin.New()
+	registerChannelRoutes(engine.Group("/api"))
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/channel/1/astergate/usage", nil))
+	assert.Equal(t, http.StatusUnauthorized, recorder.Code)
+}
+
+func TestAsterGateDeploymentOptIn(t *testing.T) {
+	for _, value := range []string{"", "false", "true"} {
+		t.Run("ENABLE_ASTERGATE="+value, func(t *testing.T) {
+			t.Setenv("ENABLE_ASTERGATE", value)
+			enabled := value == "true"
+			engine := gin.New()
+			registerChannelRoutes(engine.Group("/api"))
+			SetRelayRouter(engine)
+			for _, target := range []string{"/api/channel/:id/astergate/usage", "/v1/messages/count_tokens"} {
+				found := false
+				for _, route := range engine.Routes() {
+					if route.Path == target {
+						found = true
+					}
+				}
+				assert.Equal(t, enabled, found, target)
+			}
+			if !enabled {
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				err := middleware.SetupContextForSelectedChannel(c, &model.Channel{Type: constant.ChannelTypeAsterGate}, "claude-test")
+				require.NotNil(t, err, "persisted/imported channels must not bypass the deployment gate")
+			}
+		})
+	}
 }

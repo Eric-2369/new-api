@@ -731,6 +731,9 @@ export function useCommonLogsColumns(
 
           return (
             <StreamTpsCell
+              astergatePerformance={
+                other?.fork_extensions?.astergate_performance
+              }
               clientTransport={other?.fork_extensions?.client_transport}
               isStream={log.is_stream}
               isTask={other?.is_task === true}

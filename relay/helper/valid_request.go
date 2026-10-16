@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -34,7 +35,11 @@ func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dt
 			request, err = GetAndValidateGeminiRequest(c)
 		}
 	case types.RelayFormatClaude:
-		request, err = GetAndValidateClaudeRequest(c)
+		if common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeAsterGate {
+			request, err = GetAndValidateAsterGateRequest(c)
+		} else {
+			request, err = GetAndValidateClaudeRequest(c)
+		}
 	case types.RelayFormatOpenAIResponses:
 		request, err = GetAndValidateResponsesRequest(c)
 	case types.RelayFormatOpenAIResponsesCompaction:

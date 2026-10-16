@@ -81,6 +81,7 @@ var accessTokenHelperRoutes = map[string]authz.Permission{
 
 func newAccessTokenScopeTestEngine(t *testing.T) *gin.Engine {
 	t.Helper()
+	t.Setenv("ENABLE_ASTERGATE", "true")
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	// A permission route that is also in the static table panics here.

@@ -531,6 +531,12 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 		return fmt.Errorf("channel cannot be empty")
 	}
 
+	if channel.Type == constant.ChannelTypeAsterGate {
+		if err := validateAsterGateChannel(channel); err != nil {
+			return err
+		}
+	}
+
 	// 校验 channel settings
 	if err := channel.ValidateSettings(); err != nil {
 		return common.NewMessage("Invalid channel settings format: {{error}}", map[string]any{"error": err.Error()})

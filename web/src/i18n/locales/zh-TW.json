@@ -7338,6 +7338,18 @@
     "Zhipu": "智譜",
     "Zhipu GLM": "智譜GLM",
     "Zhipu V4": "智譜 V4",
-    "Zoom": "縮放"
+    "Zoom": "縮放",
+    "5-hour usage": "5 小時用量",
+    "AsterGate": "AsterGate",
+    "AsterGate requires Claude Code; this channel test is skipped. Verify with Claude Code.": "AsterGate 僅允許 Claude Code，已略過此渠道測試。請使用 Claude Code 驗證。",
+    "Bind this upstream key to one direct Claude account to share usage": "將上游金鑰綁定至單一直連 Claude 帳號以分享用量",
+    "Forward Claude requests unchanged to AsterGate": "將 Claude 請求原樣轉送至 AsterGate",
+    "Invalid AsterGate channel configuration": "AsterGate 渠道設定無效：請填寫有效位址，並關閉模型對映、參數覆寫、標頭覆寫、自訂系統提示詞及略過 TLS 驗證",
+    "No recent upstream usage observation is available": "暫無上游近期用量資料",
+    "Reset time": "重設時間",
+    "Shared upstream account usage, not usage of this key alone": "顯示上游帳號的共享用量，並非僅此金鑰的用量",
+    "The bound upstream account is unavailable or not authorized for this key": "綁定的上游帳號無法使用，或此金鑰無權存取該帳號",
+    "Usage sharing is disabled for this upstream key": "此上游金鑰未開啟用量分享",
+    "Weekly usage": "每週用量"
   }
 }

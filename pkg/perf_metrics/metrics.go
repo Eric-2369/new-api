@@ -57,6 +57,13 @@ func RecordRelayResult(ctx context.Context, info *relaycommon.RelayInfo, apiErr 
 	if generationMs <= 0 {
 		generationMs = latencyMs
 	}
+	outputTokens := info.PerformanceOutputTokens
+	if p := info.AsterGatePerformance; p != nil {
+		generationMs, outputTokens = p.GenerationMS, p.OutputTokens
+		if generationMs <= 0 {
+			outputTokens = 0
+		}
+	}
 	Record(Sample{
 		Model:        info.OriginModelName,
 		Group:        info.UsingGroup,
@@ -64,7 +71,7 @@ func RecordRelayResult(ctx context.Context, info *relaycommon.RelayInfo, apiErr 
 		TtftMs:       ttftMs,
 		HasTtft:      hasTtft,
 		Success:      outcome == OutcomeSuccess,
-		OutputTokens: info.PerformanceOutputTokens,
+		OutputTokens: outputTokens,
 		GenerationMs: generationMs,
 	})
 }

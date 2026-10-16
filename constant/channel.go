@@ -202,6 +202,7 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeTaskPlugin:     "Task Plugin",
 	ChannelTypeVLLM:           "vLLM",
 	ChannelTypeSGLang:         "SGLang",
+	ChannelTypeAsterGate:      "AsterGate",
 }
 
 func GetChannelTypeName(channelType int) string {

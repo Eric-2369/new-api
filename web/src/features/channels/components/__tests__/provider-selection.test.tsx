@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,9 +17,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { act, render, screen, within } from '@testing-library/react'
+import { act, render as renderUI, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
+import type { ReactElement } from 'react'
 import { I18nextProvider } from 'react-i18next'
 import { expect, test, vi } from 'vitest'
 
@@ -26,6 +28,16 @@ import zh from '@/i18n/locales/zh.json'
 
 import type { TaskPluginOption } from '../../api'
 import { ChannelProviderPicker } from '../drawers/channel-provider-picker'
+
+function render(ui: ReactElement, asterGateEnabled = false) {
+  const client = new QueryClient()
+  client.setQueryData(['status'], { astergate_enabled: asterGateEnabled })
+  return renderUI(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  })
+}
 
 const plugins = [
   {
@@ -865,3 +877,39 @@ test('an empty plugin filter reports that no plugins can be bound', async () => 
   expect(screen.getByText('No plugins available for binding')).toBeVisible()
   expect(screen.queryByRole('option')).not.toBeInTheDocument()
 })
+
+test.each([false, true])(
+  'AsterGate selection follows the server opt-in (%s)',
+  async (enabled) => {
+    const user = userEvent.setup()
+    const select = vi.fn()
+    render(
+      <ChannelProviderPicker
+        plugins={[]}
+        canBindPlugin={false}
+        loading={false}
+        failed={false}
+        disabled={false}
+        onRetry={vi.fn()}
+        onSelect={select}
+      />,
+      enabled
+    )
+    await user.type(screen.getByRole('combobox'), 'AsterGate')
+    if (enabled) {
+      const option = screen.getByRole('option', { name: /AsterGate/ })
+      expect(option.querySelector('img')?.getAttribute('src')).toContain(
+        'logo.svg'
+      )
+      await user.click(option)
+      expect(select).toHaveBeenCalledWith({ kind: 'builtin', type: 1001 })
+    } else {
+      expect(
+        screen.queryByRole('option', { name: /AsterGate/ })
+      ).not.toBeInTheDocument()
+      await user.clear(screen.getByRole('combobox'))
+      await user.type(screen.getByRole('combobox'), '1001')
+      expect(screen.queryByRole('option')).not.toBeInTheDocument()
+    }
+  }
+)

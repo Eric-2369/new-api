@@ -493,3 +493,152 @@ func TestTestAllChannelsRejectsExistingActiveTask(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
 	require.Contains(t, recorder.Body.String(), "A channel test task is already running or queued")
 }
+
+func TestAsterGateChannelValidationAndProbe(t *testing.T) {
+	t.Setenv("ENABLE_ASTERGATE", "true")
+	t.Run("disabled deployment rejects channel creation and skips probes", func(t *testing.T) {
+		t.Setenv("ENABLE_ASTERGATE", "")
+		channel := &model.Channel{Type: constant.ChannelTypeAsterGate}
+		require.Error(t, validateChannel(channel, true))
+		result := testAsterGateChannel(context.Background(), channel, "claude-test", false)
+		require.ErrorIs(t, result.localErr, errAsterGateProbeRestricted)
+	})
+	require.Error(t, validateChannel(nil, false))
+	for _, tc := range []struct {
+		name, base, mapping, settings string
+		valid                         bool
+	}{
+		{"valid", "https://gateway.example/prefix/v1", "", "{}", true},
+		{"missing_url", "", "", "{}", false},
+		{"url_credentials", "https://secret@gateway.example", "", "{}", false},
+		{"mapping", "https://gateway.example", `{"a":"b"}`, "{}", false},
+		{"system_prompt", "https://gateway.example", "", `{"system_prompt":"override"}`, false},
+		{"insecure_tls", "https://gateway.example", "", `{"tls_insecure_skip_verify":true}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			channel := &model.Channel{Type: constant.ChannelTypeAsterGate, BaseURL: &tc.base, ModelMapping: &tc.mapping, Setting: &tc.settings}
+			err := validateChannel(channel, false)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/messages", r.URL.Path)
+		assert.Equal(t, "Bearer test-key", r.Header.Get("Authorization"))
+		var body map[string]any
+		if !assert.NoError(t, common.DecodeJson(r.Body, &body)) {
+			return
+		}
+		assert.Equal(t, "claude/opaque[1m]", body["model"])
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"message","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+	channel := &model.Channel{Type: constant.ChannelTypeAsterGate, BaseURL: &server.URL, Key: "test-key"}
+	result := testChannel(context.Background(), channel, 0, "claude/opaque[1m]", "", false)
+	require.NoError(t, result.localErr)
+	require.Nil(t, result.newAPIError)
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeAnthropic}, common.GetEndpointTypesByChannelType(constant.ChannelTypeAsterGate, "claude/test"))
+	apiType, ok := common.ChannelType2APIType(constant.ChannelTypeAsterGate)
+	assert.False(t, ok)
+	assert.Equal(t, -1, apiType, "non-Claude routes must not fall back to OpenAI")
+}
+
+func TestAsterGateTokenCountingIsChannelScoped(t *testing.T) {
+	t.Setenv("ENABLE_ASTERGATE", "true")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/messages/count_tokens", r.URL.Path)
+		assert.Equal(t, "Bearer peer-key", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42,"future_field":true}`))
+	}))
+	defer server.Close()
+	for _, channelType := range []int{constant.ChannelTypeAsterGate, constant.ChannelTypeAnthropic} {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest("POST", "/v1/messages/count_tokens", bytes.NewBufferString(`{"model":"claude/test","messages":[{"role":"user","content":"hi"}]}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		common.SetContextKey(c, constant.ContextKeyChannelType, channelType)
+		common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, server.URL)
+		common.SetContextKey(c, constant.ContextKeyChannelKey, "peer-key")
+		CountAsterGateTokens(c)
+		common.CleanupBodyStorage(c)
+		if channelType == constant.ChannelTypeAsterGate {
+			assert.Equal(t, http.StatusOK, recorder.Code)
+			assert.Equal(t, `{"input_tokens":42,"future_field":true}`, recorder.Body.String())
+		} else {
+			// Gin commits c.Status when the real router finishes the handler.
+			assert.Equal(t, http.StatusNotFound, c.Writer.Status())
+		}
+	}
+}
+
+func TestAsterGateRestrictedProbeSkipsHealthJudgment(t *testing.T) {
+	t.Setenv("ENABLE_ASTERGATE", "true")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-AsterGate-Error-Code", "claude_code_only")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"permission_error","message":"Claude Code only"}}`))
+	}))
+	defer server.Close()
+	channel := &model.Channel{Type: constant.ChannelTypeAsterGate, BaseURL: &server.URL, Key: "key", Models: "claude-test"}
+	result := testChannel(context.Background(), channel, 0, "claude-test", "", false)
+	require.ErrorIs(t, result.localErr, errAsterGateProbeRestricted)
+	require.Nil(t, result.newAPIError)
+	summary := testChannelForHealthCheck(context.Background(), channel, 0, true, -1)
+	assert.Equal(t, channelTestSummary{}, summary, "restricted probes cannot disable or enable channels, even with a negative latency threshold")
+}
+
+func TestAsterGateProbeRejectsIncompleteResponse(t *testing.T) {
+	t.Setenv("ENABLE_ASTERGATE", "true")
+	for _, tc := range []struct {
+		name, body, contentType string
+		stream                  bool
+	}{
+		{"ping_then_eof", "event: ping\ndata: {\"type\":\"ping\"}\n\n", "text/event-stream", true},
+		{"start_then_eof", "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n", "text/event-stream", true},
+		{"not_a_message", `{}`, "application/json", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			channel := &model.Channel{Type: constant.ChannelTypeAsterGate, BaseURL: &server.URL, Key: "key"}
+			result := testAsterGateChannel(context.Background(), channel, "claude-test", tc.stream)
+			require.Error(t, result.localErr, "incomplete or invalid responses must not count as a successful channel test")
+		})
+	}
+}
+
+func TestAsterGateProbeAcceptsCompleteStream(t *testing.T) {
+	t.Setenv("ENABLE_ASTERGATE", "true")
+	for _, ending := range []string{"event: message_stop\ndata: {}\n\n", "data: {\"type\":\"message_stop\"}"} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n" + ending))
+		}))
+		channel := &model.Channel{Type: constant.ChannelTypeAsterGate, BaseURL: &server.URL, Key: "key"}
+		result := testAsterGateChannel(context.Background(), channel, "claude-test", true)
+		server.Close()
+		require.NoError(t, result.localErr)
+		require.Nil(t, result.newAPIError)
+	}
+}
+
+func TestAsterGateUnreachableHealthCheck(t *testing.T) {
+	t.Setenv("ENABLE_ASTERGATE", "true")
+	db := setupModelListControllerTestDB(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	server.Close()
+	channel := &model.Channel{Type: constant.ChannelTypeAsterGate, BaseURL: &server.URL, Key: "key", Models: "claude-test"}
+	require.NoError(t, db.Create(channel).Error)
+	summary := testChannelForHealthCheck(context.Background(), channel, 0, false, 60000)
+	assert.Equal(t, 1, summary.Tested)
+	assert.Equal(t, 0, summary.Succeeded, "connection refusal cannot be a successful health check")
+	assert.Equal(t, 1, summary.Failed)
+}

@@ -381,3 +381,62 @@ it.each([
     }
   }
 )
+
+it.each([0, 3278])(
+  'uses the same generation timing with %i thinking tokens',
+  (thinking) => {
+    renderLogs({
+      logs: [
+        {
+          ...log,
+          is_stream: true,
+          use_time: 40,
+          completion_tokens: 3513,
+          other: JSON.stringify({
+            frt: 2000,
+            fork_extensions: {
+              astergate_performance: {
+                duration_ms: 40157,
+                generation_ms: 38157,
+                output_tokens: 3513,
+                thinking_tokens: thinking,
+                basis: 'generation',
+              },
+            },
+          }),
+        },
+      ],
+    })
+    expect(screen.getByText('92 t/s')).toBeVisible()
+    expect(screen.queryByText('End-to-end')).not.toBeInTheDocument()
+    expect(screen.queryByText('1931 t/s')).not.toBeInTheDocument()
+  }
+)
+
+it('does not relabel legacy AsterGate end-to-end measurements as generation TPS', () => {
+  renderLogs({
+    logs: [
+      {
+        ...log,
+        is_stream: true,
+        use_time: 40,
+        completion_tokens: 3513,
+        other: JSON.stringify({
+          frt: 38181,
+          fork_extensions: {
+            astergate_performance: {
+              duration_ms: 40157,
+              generation_ms: 40157,
+              output_tokens: 3513,
+              thinking_tokens: 3278,
+              basis: 'end_to_end',
+            },
+          },
+        }),
+      },
+    ],
+  })
+  expect(screen.queryByText('87 t/s')).not.toBeInTheDocument()
+  expect(screen.queryByText('1931 t/s')).not.toBeInTheDocument()
+  expect(screen.queryByText('End-to-end')).not.toBeInTheDocument()
+})

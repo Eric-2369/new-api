@@ -36,7 +36,11 @@ func AppendClientTransportLogInfo(ctx *gin.Context, info *relaycommon.RelayInfo,
 		transport = "websocket"
 	}
 	if transport != "" {
-		other.SetPublic("fork_extensions", map[string]any{"client_transport": transport})
+		extensions := map[string]any{"client_transport": transport}
+		if info != nil && info.AsterGatePerformance != nil {
+			extensions["astergate_performance"] = info.AsterGatePerformance
+		}
+		other.SetPublic("fork_extensions", extensions)
 	}
 }
 

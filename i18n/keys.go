@@ -113,3 +113,11 @@ const (
 	MsgChannelUpstreamUpdateFailedChannels  = "channel.upstream_update_failed_channels"
 	MsgChannelUpstreamUpdateMoreOmitted     = "channel.upstream_update_more_omitted"
 )
+
+// Local AsterGate extension errors.
+const (
+	MsgAsterGateInvalidRequest = "astergate.invalid_request"
+	MsgAsterGateMaxTokens      = "astergate.max_tokens"
+	MsgAsterGateTransport      = "astergate.transport"
+	MsgAsterGateUpstream       = "astergate.upstream"
+)

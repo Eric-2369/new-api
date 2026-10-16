@@ -7338,6 +7338,18 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "5-hour usage": "Использование за 5 часов",
+    "AsterGate": "AsterGate",
+    "AsterGate requires Claude Code; this channel test is skipped. Verify with Claude Code.": "AsterGate разрешает только Claude Code; тест канала пропущен. Проверьте через Claude Code.",
+    "Bind this upstream key to one direct Claude account to share usage": "Привяжите ключ вышестоящего шлюза к одному прямому аккаунту Claude для доступа к использованию",
+    "Forward Claude requests unchanged to AsterGate": "Передавать запросы Claude в AsterGate без изменений",
+    "Invalid AsterGate channel configuration": "Неверная конфигурация AsterGate: проверьте URL, отключите преобразования и пропуск проверки TLS",
+    "No recent upstream usage observation is available": "Нет свежих данных об использовании вышестоящего аккаунта",
+    "Reset time": "Время сброса",
+    "Shared upstream account usage, not usage of this key alone": "Общее использование вышестоящего аккаунта, а не только этого ключа",
+    "The bound upstream account is unavailable or not authorized for this key": "Привязанный аккаунт недоступен или не разрешён для этого ключа",
+    "Usage sharing is disabled for this upstream key": "Общий доступ к использованию отключён для этого ключа",
+    "Weekly usage": "Использование за неделю"
   }
 }
